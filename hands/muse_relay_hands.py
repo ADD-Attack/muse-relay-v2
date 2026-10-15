@@ -7,9 +7,10 @@ WHAT IT DOES
   - Starts the relay server on 127.0.0.1:5000 (localhost only -- nothing on
     your network can reach it directly).
   - Opens a Cloudflare quick tunnel and shows the URL in the window.
-  - Generates a FRESH strong secret on every launch. The old workflow (one
-    fixed secret, reused across sessions) is gone: when you close the app,
-    that secret stops existing.
+  - Uses a strong per-machine secret: generated on first run and stored
+    at %USERPROFILE%\\.muse-relay-v2\\hands-secret.txt -- the same file
+    the packaged v2 app owns -- so restarts, the gateway, and this app
+    keep agreeing on it. Delete that file to rotate the secret.
   - You paste the URL + secret to Muse in chat when you want a session.
   - Close the window (or press Stop) and everything dies instantly: server,
     tunnel, secret.
@@ -42,7 +43,11 @@ WHAT MUSE CAN DO WITH IT (unchanged from cursor_relay.py)
   POST /type    {text}      type text
   POST /key     {key}       press a key ("enter", "tab", "esc", ...)
   POST /scroll  {clicks}    scroll
-  Every call except /health needs header  X-Secret: <the app's secret>
+  Every call except /health needs the secret, as header
+  X-Secret: <the app's secret> or, equivalently, as a query parameter
+  ?secret=<the app's secret> (v1 parity: some proxy/tunnel paths strip
+  custom headers; a URL parameter survives them. Prefer the header when
+  both work -- URLs are more likely to be logged.)
 """
 
 import ctypes
@@ -67,9 +72,41 @@ from flask import Flask, request, jsonify, send_file
 
 PORT = 5000
 
-# Fresh per launch, from the OS CSPRNG. 24 bytes -> a 32-character
-# URL-safe string (~190 bits). Never stored, never reused.
-SHARED_SECRET = secrets_mod.token_urlsafe(24)
+def _load_or_create_secret() -> str:
+    """Per-machine hands secret, shared with the packaged v2 app.
+
+    Stored at ~/.muse-relay-v2/hands-secret.txt (created on first run,
+    0600 where the OS honors it; the value is never logged). Falls back
+    to a per-launch secret if the file cannot be read or written.
+    """
+    path = os.path.join(
+        os.path.expanduser("~"), ".muse-relay-v2", "hands-secret.txt"
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            saved = fh.read().strip()
+        if len(saved) >= 16:
+            return saved
+    except OSError:
+        pass
+    value = secrets_mod.token_urlsafe(32)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(value + "\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # best effort (on Windows this only toggles read-only)
+    except OSError:
+        pass
+    return value
+
+
+# From the OS CSPRNG (via the per-machine file above). When the packaged
+# v2 app hosts this module it overwrites this global with its own loaded
+# value -- the same file, so the two always agree.
+SHARED_SECRET = _load_or_create_secret()
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.15
@@ -175,9 +212,11 @@ def _record_failure() -> None:
 
 @app.before_request
 def gate():
+    if request.path == "/health":
+        return  # liveness only: never gated, never counted as a failure
     if _auth_locked_out():
         return jsonify({"ok": False, "error": "locked out"}), 429
-    provided = request.headers.get("X-Secret") or ""
+    provided = request.headers.get("X-Secret") or request.args.get("secret") or ""
     if not hmac.compare_digest(provided, SHARED_SECRET):
         _record_failure()
         log_line(f"rejected request to {request.path} (bad secret)")
@@ -246,6 +285,7 @@ def scroll():
 
 log_queue: "queue.Queue[str]" = queue.Queue()
 url_queue: "queue.Queue[str]" = queue.Queue()
+status_queue: "queue.Queue[str]" = queue.Queue()
 
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
@@ -261,6 +301,7 @@ class RelayApp:
         self.tunnel_proc = None
         self.transport = None
         self.stopping = False
+        self.server_failed = False
 
         root.title("Muse Relay")
         root.resizable(False, False)
@@ -322,7 +363,7 @@ class RelayApp:
             except Exception:
                 pass
         log_line(f"phone alerts: subscribe to ntfy topic '{ALERT_TOPIC}' on your phone")
-        log_line(f"session secret generated ({len(SHARED_SECRET)} chars)")
+        log_line(f"hands secret ready ({len(SHARED_SECRET)} chars, per-machine file)")
 
         threading.Thread(target=self._run_server, daemon=True).start()
         threading.Thread(target=self._run_tunnel, daemon=True).start()
@@ -368,7 +409,9 @@ class RelayApp:
                 )
                 self.server.serve_forever()
         except Exception as exc:  # e.g. port already in use
+            self.server_failed = True
             log_line(f"SERVER ERROR: {exc}")
+            status_queue.put("Server FAILED to start -- see log")
 
     def _run_tunnel(self):
         flags = 0
@@ -432,8 +475,16 @@ class RelayApp:
             while True:
                 url = url_queue.get_nowait()
                 self.url_var.set(url)
-                self.status.set("Running — paste the URL and secret to Muse")
+                if self.server_failed:
+                    self.status.set("Tunnel up, but the server FAILED -- see log")
+                else:
+                    self.status.set("Running — paste the URL and secret to Muse")
                 self._append_log(f"tunnel is up: {url}")
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self.status.set(status_queue.get_nowait())
         except queue.Empty:
             pass
         if not self.stopping:
