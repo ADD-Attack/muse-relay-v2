@@ -107,4 +107,28 @@ session secret into the gateway's `HANDS_SECRET` yourself.
 - Design rule inherited from v1's audit: the URL is obscurity, not a
   control — the secret and the transport are the controls.
 
+
+## Troubleshooting: "bad secret" 401s through a proxy
+
+If authenticated requests fail with `{"error": "bad secret"}` even though the secret is correct, suspect the agent-side HTTP proxy before the relay, the tunnel, or the secret.
+
+Some sandbox/egress proxies handle plain-HTTP requests by *fetching* them (absolute-form): the proxy rebuilds the request itself and silently drops custom headers such as `X-Secret` — and query parameters such as `?secret=` — before forwarding. The relay then quite correctly rejects what's left. Switching from header auth to query auth does not help; both are stripped.
+
+Bisect instead of guessing:
+
+1. On the Windows host itself, prove relay + secret:
+   `curl.exe -H "X-Secret: <secret>" http://127.0.0.1:5000/screenshot -o test.png`
+   A real screenshot is tens to hundreds of KB; the rejection body is 34 bytes.
+2. Repeat the same test from each hop in your chain (forwarder, tunnel). The first leg that turns a good secret into a 401 is the culprit.
+
+Fix: force a true CONNECT tunnel through the proxy. CONNECT passes the request bytes untouched, headers and query string included:
+
+```
+curl --proxytunnel -x http://<proxy-host>:<proxy-port> -H "X-Secret: <secret>" http://<relay-host>:<port>/screenshot
+```
+
+In Python, `http.client` does the same: open the connection to the proxy, call `set_tunnel(target_host, target_port)`, then send the request normally.
+
+(Learned the expensive way, Oct 2026: two evenings of tunnel and secret theories were exonerated by the bisection above; CONNECT fixed it in one request.)
+
 MIT © 2026 Christopher Moore
