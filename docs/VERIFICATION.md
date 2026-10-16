@@ -23,3 +23,28 @@ reported as SKIP with the reason, exit 0).
 4. With the packaged app running (Start pressed), copy its gateway token,
    `$env:RELAY_GATEWAY_TOKEN = "<token>"`, then `python tools\smoke.py --use-running`.
    Expect all PASS.
+
+## WP0b — takeover interlock
+
+Verified automatically (`python -m pytest tests`): 20 agent moves never
+trip; a cursor deviation yields; 409 body/`Retry-After` on every act
+endpoint; screenshot still served; `type` stops mid-string; quiet period
+returns control; continued input extends the yield; fallback suppression
+window; gateway passes the 409 through and reports `control` in
+`/v1/info` ("unknown" for hands without `/status`). Input is stubbed —
+no real hooks, cursor or desktop were involved.
+
+**Unverified — run on the Windows PC (rebuild the app first: `build_app.bat`):**
+
+1. Start the packaged app, press Start. The log should show
+   "takeover interlock: watching for local keyboard/mouse input". If it
+   says "input hooks unavailable", note the error — the fallback detector
+   is active.
+2. `$env:RELAY_GATEWAY_TOKEN = "<token>"`, then `python tools\takeover_check.py`
+   and follow the prompts. Expect `TAKEOVER CHECK PASS`.
+3. Watch the Hands status line in the app while moving the mouse: it
+   should switch to "YIELDED" within about a second and back to "agent
+   has control" about 10 s after you stop.
+4. Feel check: with the app running, use the PC normally for a minute —
+   mouse and typing must not feel laggy (the low-level hooks run in
+   Python; lag would mean the hook callbacks are being starved).

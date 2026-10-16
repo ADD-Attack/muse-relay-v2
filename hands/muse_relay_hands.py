@@ -35,6 +35,20 @@ SECURITY NOTES
   - pyautogui.FAILSAFE is on: slam the mouse into any screen corner to
     abort the current action.
 
+TAKEOVER INTERLOCK (the person at the PC always wins)
+  When physical input arrives that the agent did not send -- the mouse
+  moving when no agent action moved it, or a local key / mouse-button
+  press -- the hands enter YIELDED: move/click/type/key/scroll answer
+  HTTP 409 {"ok": false, "error": "user active — control yielded"}
+  (screenshots still work). Control returns automatically after
+  MUSE_TAKEOVER_QUIET_SECONDS (default 10) with no local input.
+  Detection on Windows uses low-level input hooks, which mark input
+  injected by software (the agent's pyautogui calls) so it never trips
+  the interlock; a cursor-deviation poll backs it up. If the hooks
+  cannot be installed, a GetLastInputInfo poll with a short suppression
+  window around agent actions is used instead (see README). Set
+  MUSE_TAKEOVER=0 to disable the interlock entirely (not recommended).
+
 WHAT MUSE CAN DO WITH IT (unchanged from cursor_relay.py)
   GET  /health              liveness only, no secret needed
   GET  /screenshot          PNG of your screen
@@ -43,6 +57,7 @@ WHAT MUSE CAN DO WITH IT (unchanged from cursor_relay.py)
   POST /type    {text}      type text
   POST /key     {key}       press a key ("enter", "tab", "esc", ...)
   POST /scroll  {clicks}    scroll
+  GET  /status              who has control: {"control": "agent"|"yielded", ...}
   Every call except /health needs the secret, as header
   X-Secret: <the app's secret> or, equivalently, as a query parameter
   ?secret=<the app's secret> (v1 parity: some proxy/tunnel paths strip
@@ -50,6 +65,7 @@ WHAT MUSE CAN DO WITH IT (unchanged from cursor_relay.py)
   both work -- URLs are more likely to be logged.)
 """
 
+import contextlib
 import ctypes
 import datetime
 import hmac
@@ -110,6 +126,293 @@ SHARED_SECRET = _load_or_create_secret()
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.15
+
+# ---------------------------------------------------------------- takeover
+
+YIELD_ERROR = "user active — control yielded"
+
+
+class Takeover:
+    """Who has control: the agent, or the person at the keyboard.
+
+    Local input (anything the agent did not send) marks the time of the
+    last local activity; while that is less than ``quiet_seconds`` ago,
+    control is YIELDED and act calls are refused. Two detectors feed it:
+
+      * cursor deviation (every platform): a poll compares the cursor
+        with where it was last seen; a move while no agent action is in
+        flight is local input. Agent actions run inside
+        ``agent_action()``, which re-baselines the cursor when they end,
+        so agent-commanded moves never count.
+      * Windows low-level hooks: keyboard and mouse events WITHOUT the
+        "injected" flag are local input. pyautogui sends through
+        SendInput, which Windows marks injected, so the agent's own keys
+        and clicks never trip it. If the hooks cannot be installed, a
+        GetLastInputInfo poll is used, ignoring input during agent
+        actions plus ``suppress_seconds`` afterwards -- the tradeoff:
+        local keystrokes inside that window go unnoticed.
+    """
+
+    def __init__(
+        self,
+        get_position,
+        quiet_seconds=10.0,
+        clock=time.monotonic,
+        tolerance=2,
+        suppress_seconds=0.3,
+        on_change=None,
+    ):
+        self._get_position = get_position
+        self.quiet_seconds = float(quiet_seconds)
+        self._clock = clock
+        self._tolerance = tolerance
+        self._suppress_seconds = suppress_seconds
+        self._on_change = on_change
+        self._lock = threading.RLock()
+        self._last_local = None  # clock() of the last local input
+        self._last_reason = ""
+        self._agent_depth = 0
+        self._agent_until = 0.0
+        self._last_seen = None
+        self._reported = "agent"
+        self._started = False
+        self._last_input_tick = None
+        self.detector = "cursor-poll"
+
+    # ---- inputs -----------------------------------------------------
+    def local_input(self, reason):
+        """Record physical input. Cheap and lock-free: called from hooks."""
+        self._last_reason = reason
+        self._last_local = self._clock()
+
+    @contextlib.contextmanager
+    def agent_action(self):
+        with self._lock:
+            self._agent_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._agent_depth -= 1
+                self._agent_until = self._clock() + self._suppress_seconds
+                try:
+                    self._last_seen = tuple(self._get_position())
+                except Exception:
+                    pass
+
+    def agent_moving(self):
+        """True while an agent action runs or just ended (lock-free read)."""
+        return self._agent_depth > 0 or self._clock() < self._agent_until
+
+    def check_cursor(self):
+        """One cursor-deviation poll step."""
+        with self._lock:
+            try:
+                pos = tuple(self._get_position())
+            except Exception:
+                return
+            last, self._last_seen = self._last_seen, pos
+            if self._agent_depth > 0 or last is None:
+                return
+            moved = max(abs(pos[0] - last[0]), abs(pos[1] - last[1])) > self._tolerance
+        if moved:
+            self.local_input("mouse moved")
+
+    def check_last_input(self, tick):
+        """Fallback detector: GetLastInputInfo tick changed."""
+        with self._lock:
+            prev, self._last_input_tick = self._last_input_tick, tick
+            if prev is None or tick == prev:
+                return
+            if self._agent_depth > 0 or self._clock() < self._agent_until:
+                return
+        self.local_input("keyboard/mouse input")
+
+    # ---- state ------------------------------------------------------
+    def retry_after(self):
+        last = self._last_local
+        if last is None:
+            return 0.0
+        return max(0.0, self.quiet_seconds - (self._clock() - last))
+
+    def is_yielded(self):
+        yielded = self.retry_after() > 0
+        self._report("yielded" if yielded else "agent")
+        return yielded
+
+    def state(self):
+        yielded = self.is_yielded()
+        return {
+            "control": "yielded" if yielded else "agent",
+            "retry_after": round(self.retry_after(), 1),
+            "reason": self._last_reason if yielded else "",
+            "quiet_seconds": self.quiet_seconds,
+            "detector": self.detector,
+        }
+
+    def _report(self, state):
+        with self._lock:
+            if state == self._reported:
+                return
+            self._reported = state
+        if self._on_change is not None:
+            try:
+                self._on_change(state, self._last_reason)
+            except Exception:
+                pass
+
+    # ---- background watchers -----------------------------------------
+    def start(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        if os.name == "nt":
+            threading.Thread(target=self._hook_thread, name="takeover-hooks", daemon=True).start()
+        threading.Thread(target=self._poll_thread, name="takeover-poll", daemon=True).start()
+
+    def _poll_thread(self):
+        while True:
+            self.check_cursor()
+            if os.name == "nt" and self.detector == "cursor-poll+lastinput":
+                tick = _last_input_tick()
+                if tick is not None:
+                    self.check_last_input(tick)
+            self.is_yielded()  # reports state transitions (log + window)
+            time.sleep(0.1)
+
+    def _hook_thread(self):
+        try:
+            _run_input_hooks(self)
+        except Exception as exc:
+            self.detector = "cursor-poll+lastinput"
+            log_line(f"takeover: input hooks unavailable ({exc}); using fallback detector")
+
+
+def _last_input_tick():
+    """Windows GetLastInputInfo tick, or None."""
+    try:
+        from ctypes import wintypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return info.dwTime
+    except Exception:
+        pass
+    return None
+
+
+def _run_input_hooks(takeover):
+    """Install WH_KEYBOARD_LL + WH_MOUSE_LL and pump messages (Windows only).
+
+    Callbacks only look at the "injected" flag and stamp a time -- they
+    must return fast, or Windows drops the hook.
+    """
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
+    LLKHF_INJECTED = 0x10
+    LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED = 0x01, 0x02
+    WM_MOUSEMOVE = 0x0200
+    LRESULT = ctypes.c_ssize_t
+    ULONG_PTR = ctypes.c_size_t
+
+    class KBDLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ("vkCode", wintypes.DWORD),
+            ("scanCode", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
+    class MSLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ("pt", wintypes.POINT),
+            ("mouseData", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
+    HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = ctypes.c_void_p
+    user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = LRESULT
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+    def on_key(n_code, w_param, l_param):
+        if n_code == 0:
+            info = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            if not info.flags & LLKHF_INJECTED:
+                takeover.local_input("key press")
+        return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+    def on_mouse(n_code, w_param, l_param):
+        if n_code == 0:
+            info = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if not info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED):
+                if w_param != WM_MOUSEMOVE:
+                    takeover.local_input("mouse button")
+                elif not takeover.agent_moving():
+                    # pyautogui moves with SetCursorPos, which may not carry
+                    # the injected flag; moves during an agent action (plus
+                    # the short suppression window) are the agent's own.
+                    takeover.local_input("mouse moved")
+        return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+    # Keep references: ctypes callbacks must outlive the hooks.
+    takeover._hook_procs = (HOOKPROC(on_key), HOOKPROC(on_mouse))
+    module = kernel32.GetModuleHandleW(None)
+    hooks = [
+        user32.SetWindowsHookExW(WH_KEYBOARD_LL, takeover._hook_procs[0], module, 0),
+        user32.SetWindowsHookExW(WH_MOUSE_LL, takeover._hook_procs[1], module, 0),
+    ]
+    if not all(hooks):
+        raise OSError(f"SetWindowsHookExW failed (error {ctypes.get_last_error()})")
+    takeover.detector = "input-hooks+cursor-poll"
+    log_line("takeover interlock: watching for local keyboard/mouse input")
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+
+
+def _on_takeover_change(state, reason):
+    if state == "yielded":
+        log_line(f"CONTROL YIELDED to the person at the PC ({reason}) -- agent actions paused")
+        file_log(f"control yielded ({reason})")
+        status_queue.put("YIELDED — you have control; agent paused")
+    else:
+        log_line("control returned to the agent (quiet period over)")
+        file_log("control returned to agent")
+        status_queue.put("Agent has control — move the mouse or press a key to take over")
+
+
+TAKEOVER_ENABLED = os.environ.get("MUSE_TAKEOVER", "1") != "0"
+TAKEOVER = Takeover(
+    get_position=lambda: pyautogui.position(),
+    quiet_seconds=float(os.environ.get("MUSE_TAKEOVER_QUIET_SECONDS", "10")),
+    on_change=_on_takeover_change,
+)
+ACT_PATHS = {"/move", "/click", "/type", "/key", "/scroll", "/hotkey"}
+
+
+def _yielded_response(extra=None):
+    body = {"ok": False, "error": YIELD_ERROR, "control": "yielded"}
+    body.update(extra or {})
+    resp = jsonify(body)
+    resp.status_code = 409
+    resp.headers["Retry-After"] = str(max(1, int(TAKEOVER.retry_after() + 0.999)))
+    return resp
 
 # ---------------------------------------------------------------- server
 
@@ -221,6 +524,10 @@ def gate():
         _record_failure()
         log_line(f"rejected request to {request.path} (bad secret)")
         return jsonify({"ok": False, "error": "bad secret"}), 401
+    if TAKEOVER_ENABLED:
+        TAKEOVER.start()  # idempotent; the windows also start it at launch
+        if request.path in ACT_PATHS and TAKEOVER.is_yielded():
+            return _yielded_response()
 
 
 @app.after_request
@@ -246,38 +553,57 @@ def screenshot():
     return resp
 
 
+@app.get("/status")
+def status():
+    state = TAKEOVER.state() if TAKEOVER_ENABLED else {"control": "agent", "detector": "disabled"}
+    return {"ok": True, **state}
+
+
 @app.post("/move")
 def move():
     d = request.get_json(force=True)
-    pyautogui.moveTo(int(d["x"]), int(d["y"]), duration=0.2)
+    with TAKEOVER.agent_action():
+        pyautogui.moveTo(int(d["x"]), int(d["y"]), duration=0.2)
     return {"ok": True}
 
 
 @app.post("/click")
 def click():
     d = request.get_json(force=True)
-    pyautogui.click(x=int(d["x"]), y=int(d["y"]), button=d.get("button", "left"))
+    with TAKEOVER.agent_action():
+        pyautogui.click(x=int(d["x"]), y=int(d["y"]), button=d.get("button", "left"))
     return {"ok": True}
 
 
 @app.post("/type")
 def type_text():
     d = request.get_json(force=True)
-    pyautogui.write(d["text"], interval=0.02)
+    text = str(d["text"])
+    with TAKEOVER.agent_action():
+        # One character at a time (what pyautogui.write does anyway), so a
+        # takeover mid-string stops typing instead of finishing into
+        # whatever window the person has moved to.
+        for i, ch in enumerate(text):
+            if TAKEOVER_ENABLED and TAKEOVER.is_yielded():
+                return _yielded_response({"typed": i, "total": len(text)})
+            pyautogui.write(ch)
+            time.sleep(0.02)
     return {"ok": True}
 
 
 @app.post("/key")
 def key():
     d = request.get_json(force=True)
-    pyautogui.press(d["key"])
+    with TAKEOVER.agent_action():
+        pyautogui.press(d["key"])
     return {"ok": True}
 
 
 @app.post("/scroll")
 def scroll():
     d = request.get_json(force=True)
-    pyautogui.scroll(int(d.get("clicks", 3)))
+    with TAKEOVER.agent_action():
+        pyautogui.scroll(int(d.get("clicks", 3)))
     return {"ok": True}
 
 
@@ -365,6 +691,10 @@ class RelayApp:
         log_line(f"phone alerts: subscribe to ntfy topic '{ALERT_TOPIC}' on your phone")
         log_line(f"hands secret ready ({len(SHARED_SECRET)} chars, per-machine file)")
 
+        if TAKEOVER_ENABLED:
+            TAKEOVER.start()
+        else:
+            log_line("WARNING: takeover interlock disabled (MUSE_TAKEOVER=0)")
         threading.Thread(target=self._run_server, daemon=True).start()
         threading.Thread(target=self._run_tunnel, daemon=True).start()
         self._poll()

@@ -48,7 +48,7 @@ HANDS_PORT = 5000
 GATEWAY_PORT = 5010
 PARSER_PORT = 5011
 HANDS_URL = "http://127.0.0.1:5000"
-POLL_MS = 5000
+POLL_MS = 1000  # also drives the hands control-state line
 
 SERVICE_FILES = {
     "hands": "hands/muse_relay_hands.py",
@@ -325,6 +325,12 @@ class RelayApp:
             # secret itself. Its gate() reads this global per request.
             module.SHARED_SECRET = self._hands_secret
             self._hands_module = module
+            # Takeover interlock: start watching for local input now,
+            # not on the first agent request.
+            if getattr(module, "TAKEOVER_ENABLED", False):
+                module.TAKEOVER.start()
+            elif hasattr(module, "TAKEOVER"):
+                self.log_line("WARNING: takeover interlock disabled (MUSE_TAKEOVER=0).")
             self.log_line(
                 "Hands config check: module_match=%s module_len=%s"
                 % (
@@ -385,16 +391,23 @@ class RelayApp:
                 data = r.json()
                 hands = bool(data.get("hands_reachable"))
                 parser = bool(data.get("parser_reachable"))
+                control = data.get("control", "unknown")
             except Exception:
                 hands = None
                 parser = None
+                control = "unknown"
             if hands is None:
                 self.set_status("hands", "Hands (:5000): no answer from gateway")
             else:
-                self.set_status(
-                    "hands",
-                    "Hands (:5000): reachable" if hands else "Hands (:5000): not reachable",
-                )
+                if not hands:
+                    text = "Hands (:5000): not reachable"
+                elif control == "yielded":
+                    text = "Hands (:5000): reachable — YIELDED: you have control, agent paused"
+                elif control == "agent":
+                    text = "Hands (:5000): reachable — agent has control (touch mouse/keys to take over)"
+                else:
+                    text = "Hands (:5000): reachable"
+                self.set_status("hands", text)
                 self.set_status(
                     "parser",
                     "Parser (:5011): running, reachable"

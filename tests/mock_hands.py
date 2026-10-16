@@ -40,6 +40,7 @@ def _tiny_png(width=4, height=3):
 def create_app(secret):
     app = Flask("mock_hands")
     app.config["actions"] = []  # every accepted action, for assertions
+    app.config["yielded"] = False  # flip to simulate the takeover interlock
 
     @app.before_request
     def gate():
@@ -61,8 +62,25 @@ def create_app(secret):
         resp.headers["X-Screen-Height"] = "3"
         return resp
 
+    @app.get("/status")
+    def status():
+        yielded = app.config["yielded"]
+        return {
+            "ok": True,
+            "control": "yielded" if yielded else "agent",
+            "retry_after": 7.0 if yielded else 0.0,
+            "detector": "mock",
+        }
+
     def _make(op):
         def handler():
+            if app.config["yielded"]:
+                resp = jsonify(
+                    {"ok": False, "error": "user active — control yielded", "control": "yielded"}
+                )
+                resp.status_code = 409
+                resp.headers["Retry-After"] = "7"
+                return resp
             body = request.get_json(force=True, silent=True) or {}
             app.config["actions"].append((op, body))
             return {"ok": True}

@@ -104,6 +104,12 @@ the next act call return 409 and `/v1/info` show yielded; after the
 quiet period acts succeed again; 20 consecutive agent-issued moves
 never trip the interlock; and the behavior is documented in the README.
 
+- [x] **Status:** implemented (hands `Takeover`, `/status`, 409 gate;
+  gateway `control` in `/v1/info` + 409 pass-through; app status line;
+  `tools/takeover_check.py`); unit + HTTP tests pass on Linux with stubbed
+  input. **Unverified on Windows** (hooks, real cursor) — see
+  `docs/VERIFICATION.md` (WP0b).
+
 ### WP1 — UIA endpoint in the hands
 Add UI Automation to the hands (pywinauto): an endpoint returning the
 control tree of the foreground window / desktop (name, control type,

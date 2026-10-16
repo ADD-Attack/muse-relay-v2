@@ -12,6 +12,12 @@ into the gateway's environment). Agent calls are translated:
   GET  /v1/screen            -> GET  {HANDS_URL}/screenshot  (PNG bytes back)
   POST /v1/act {"op": ...}   -> POST {HANDS_URL}/<op>        (move/click/
                                                               type/key/scroll)
+  GET  /v1/info              includes "control": "agent" | "yielded" |
+                             "unknown" (the hands' takeover interlock)
+
+While the person at the PC is using it, the hands refuse act calls with
+409 {"error": "user active — control yielded"}; /v1/act passes that
+through unchanged (with Retry-After). Drivers should back off and retry.
 """
 
 import hmac
@@ -109,19 +115,43 @@ def health():
     return jsonify({"ok": True, "service": "gateway"})
 
 
+def _control_state(hands_ok):
+    """Takeover interlock state from the hands: agent | yielded | unknown.
+
+    Not cached — it changes the moment the person touches the mouse.
+    "unknown" when the hands are unreachable, the secret is missing, or
+    the hands predate /status.
+    """
+    if not hands_ok or not HANDS_SECRET:
+        return "unknown", None
+    try:
+        r = requests.get(f"{HANDS_URL}/status", headers=_hands_headers(), timeout=2)
+        if r.status_code == 200:
+            data = r.json()
+            control = data.get("control")
+            if control in ("agent", "yielded"):
+                return control, data.get("retry_after")
+    except (requests.RequestException, ValueError):
+        pass
+    return "unknown", None
+
+
 @app.get("/v1/info")
 def info():
     hands_ok, parser_ok = _reachability()
-    return jsonify(
-        {
-            "ok": True,
-            "hands_url": HANDS_URL,
-            "hands_secret_configured": bool(HANDS_SECRET),
-            "hands_reachable": hands_ok,
-            "parser_url": PARSER_URL,
-            "parser_reachable": parser_ok,
-        }
-    )
+    control, retry_after = _control_state(hands_ok)
+    body = {
+        "ok": True,
+        "hands_url": HANDS_URL,
+        "hands_secret_configured": bool(HANDS_SECRET),
+        "hands_reachable": hands_ok,
+        "parser_url": PARSER_URL,
+        "parser_reachable": parser_ok,
+        "control": control,
+    }
+    if control == "yielded" and retry_after is not None:
+        body["control_retry_after"] = retry_after
+    return jsonify(body)
 
 
 @app.post("/v1/parse")
@@ -191,10 +221,17 @@ def act():
             ),
             502,
         )
+    # Pass-through, including the takeover interlock's 409 "user active —
+    # control yielded" refusal: body, status and Retry-After unchanged, so
+    # a well-behaved driver backs off instead of fighting the user.
     try:
-        return jsonify(r.json()), r.status_code
+        resp = jsonify(r.json())
     except ValueError:
-        return jsonify({"ok": r.ok, "status": r.status_code}), r.status_code
+        resp = jsonify({"ok": r.ok, "status": r.status_code})
+    resp.status_code = r.status_code
+    if "Retry-After" in r.headers:
+        resp.headers["Retry-After"] = r.headers["Retry-After"]
+    return resp
 
 
 if __name__ == "__main__":

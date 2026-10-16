@@ -113,6 +113,46 @@ alerts (ntfy), Waitress, Tailscale Serve preferred over any public tunnel,
 no public URL at all when Tailscale is present. In that mode you copy its
 session secret into the gateway's `HANDS_SECRET` yourself.
 
+## Takeover interlock — the person at the PC always wins
+
+When you use the PC yourself, the agent stops driving — immediately and
+automatically. The hands watch for physical input the agent did not send
+(the mouse moving when no agent action moved it, or a local key or
+mouse-button press) and **yield**:
+
+- `move` / `click` / `type` / `key` / `scroll` (and `hotkey`) answer
+  **HTTP 409** `{"ok": false, "error": "user active — control yielded"}`
+  with a `Retry-After` header; the gateway's `/v1/act` passes it through
+  unchanged. Screenshots keep working. A `type` interrupted mid-string
+  stops there and reports how many characters it typed.
+- `/v1/info` reports `"control": "agent"`, `"yielded"`, or `"unknown"`
+  (hands unreachable / older hands), and `control_retry_after` while yielded.
+- The packaged app's Hands status line shows who has control; the
+  standalone hands window shows it in its status line; both log each
+  change.
+- Control returns after a quiet period with no local input — default
+  **10 seconds**, set with `MUSE_TAKEOVER_QUIET_SECONDS`. No click needed.
+
+**How agent input is told apart from yours.** On Windows the hands install
+low-level keyboard and mouse hooks; Windows flags input sent by software
+(pyautogui's `SendInput`) as *injected*, so only non-injected input counts
+as you (mouse *moves* reported by the hook are additionally ignored while an
+agent action is in flight, because pyautogui positions the cursor with
+`SetCursorPos`, which may not be flagged as injected). A cursor-deviation poll (every 100 ms) backs this up: the cursor
+moving while no agent action is in flight counts as you; agent moves
+re-baseline the cursor when they finish. If the hooks cannot be installed,
+the hands log it and fall back to `GetLastInputInfo` with a 0.3 s
+suppression window around agent actions — **tradeoff:** in fallback mode a
+key you press while an agent action is running (or within 0.3 s of it) is
+missed; mouse movement is still caught by the cursor poll.
+
+Drivers should treat a 409 as "back off": wait `Retry-After` seconds (or
+poll `/v1/info` until `control` is `agent`), take a fresh screenshot — the
+person may have changed what's on screen — and replan.
+
+`MUSE_TAKEOVER=0` disables the interlock entirely (not recommended; the
+app logs a warning). Guided check on the PC: `python tools\takeover_check.py`.
+
 ## Security model
 
 - Nothing listens publicly by default. Preferred transport is Tailscale
