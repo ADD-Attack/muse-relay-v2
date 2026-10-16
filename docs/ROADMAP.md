@@ -150,6 +150,81 @@ belongs behind an optional extra.
 test exist, and the README marks real browser integration as optional
 and not yet wired.
 
+### WP5b — "Just works" network access on first run
+Field failure (2026-10-15, owner's machine): the packaged app started
+cleanly — all three services green, loopback self-check HTTP 200 — yet
+the gateway was unreachable from the tailnet. Windows Defender
+Firewall's Private profile (which the Tailscale adapter uses) silently
+blocks inbound connections to any app not on its allowed list, and the
+normal "allow this app?" prompt never produced a working rule for the
+packaged build: PyInstaller serves from a temp extraction path (rules
+created against it don't stick to the real exe), the prompt disappears
+if the app closes while it is pending, and an allow granted to one
+build's path does not cover the next build's path. The owner had to
+create an inbound port rule by hand to get in. A tool whose first-run
+experience is manual firewall surgery does not "just work."
+
+On Start, the app must ensure its gateway port (5010) is reachable:
+1. After the gateway reports healthy on loopback, probe for the inbound
+   firewall rule the app owns (a named rule, e.g. "Muse Relay v2 —
+   gateway 5010", TCP inbound, port-scoped, Private profile). If it is
+   missing, offer its creation in the UI: one button that requests
+   elevation (UAC) and creates it with `New-NetFirewallRule` (or
+   `netsh advfirewall firewall add rule`). Never create it silently
+   and never without the owner's click.
+2. The rule is port-scoped, never program-path-scoped, so rebuilds and
+   moving the exe never invalidate it. It is idempotent (re-running
+   Start never duplicates it) and it is removed by an explicit
+   "Remove firewall rule" control in the same window — not on Stop or
+   exit, which may be temporary.
+2b. The same check must also scan for enabled inbound BLOCK rules
+   whose program/name matches the relay executable (e.g. "muse relay
+   v2.exe"): Windows creates these silently when a firewall prompt
+   for the app is dismissed, a block rule overrides any allow rule,
+   and — the actual 2026-10-15 root cause, found only after the port
+   rule was in place — two such rules made the gateway unreachable
+   from every peer while loopback and self-checks stayed green. If
+   found, the UI must name them and offer one-click removal under the
+   same elevation flow.
+3. The app must never claim the gateway is reachable when it has only
+   verified loopback: the status line distinguishes "running
+   (loopback OK)" from "reachable from the network," and when the
+   rule is absent the UI says so in plain words, with the one-click fix
+   next to it.
+4. Do NOT solve this by disabling the firewall, switching the
+   adapter's network profile, or shelling out to blanket
+   profile-off commands — the sanctioned mechanism is the single
+   named, port-scoped, removable rule. Hands (5000) and parser (5011)
+   stay loopback-only and out of scope.
+**Done when:** on a Windows machine whose Private profile has no
+allow rule for the app, pressing Start surfaces the offer; accepting
+it makes GET /v1/info succeed from another tailnet device with no
+further manual steps; declining leaves the app running with the
+not-reachable state shown honestly; the removal control deletes the
+rule and the status line reflects that on the next poll.
+
+### WP5c — Keyboard chords in hands
+Field failure (2026-10-15, owner's machine): the Discord window sat on
+a second monitor, unreachable — hands screenshots only see the primary
+display, and every documented way to pull a window across monitors
+(Win+Shift+Arrow, the Alt+Space → Move menu, Win+P) needs a key
+*combination*. The hands `/key` endpoint is `pyautogui.press()` on a
+single key, so none of them can be sent. The session was rescued by a
+different surface entirely (Discord web in the owner's browser); the
+capability gap in hands is real and will recur.
+1. Add a chord endpoint to hands: `POST /hotkey {"keys": ["win",
+   "shift", "left"]}` implemented with `pyautogui.hotkey(*keys)`.
+   Validate key names against pyautogui's key set and reject unknown
+   names with a 400; keep single-key `/key` exactly as is.
+2. Expose it through the gateway as `/v1/act {"op": "hotkey",
+   "keys": [...]}` with the same token auth as every other act call.
+3. No new persistent permissions are involved — chords are input,
+   same trust level as the existing click/type/key surface.
+**Done when:** from a second tailnet device, with a window focused on
+a non-primary monitor, `{"op": "hotkey", "keys": ["win", "shift",
+"left"]}` moves that window to the primary monitor and a following
+`/v1/screen` shows it there.
+
 ### WP6 — Spike only: nested desktop + host/app agent split
 Research-only. Write `docs/SPIKE-NESTED-DESKTOP.md` assessing a
 Picture-in-Picture style nested desktop (agent works in a nested
