@@ -200,4 +200,11 @@ def act():
 if __name__ == "__main__":
     from waitress import serve
 
-    serve(app, host="0.0.0.0", port=5010, threads=8)
+    # GATEWAY_HOST / GATEWAY_PORT exist so local tooling (tools/smoke.py)
+    # can run the gateway loopback-only; the defaults are unchanged.
+    serve(
+        app,
+        host=os.environ.get("GATEWAY_HOST", "0.0.0.0"),
+        port=int(os.environ.get("GATEWAY_PORT", "5010")),
+        threads=8,
+    )

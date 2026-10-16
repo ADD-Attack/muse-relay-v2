@@ -72,6 +72,27 @@ models directory (`python services/parser/fetch_weights.py`, heavy deps in
 `services/parser/requirements-model.txt`). Until then it returns 501 —
 deliberately: a driver must never mistake "no model" for "empty screen".
 
+## Smoke test (one command)
+
+`tools/smoke.py` starts the parser and gateway natively (loopback only,
+throwaway gateway token), checks `/health`, token enforcement and
+`/v1/info`, and — when the hands are running — pulls one screenshot and
+presses a lone `shift` key through the gateway. One PASS/FAIL/SKIP line
+per check; secrets are never printed. If the hands are not running, the
+hand checks say so as SKIP instead of failing.
+
+```
+python tools\smoke.py                # hands at 127.0.0.1:5000, secret from
+                                      # %USERPROFILE%\.muse-relay-v2\hands-secret.txt
+python tools\smoke.py --use-running  # packaged app already running: set
+                                      # $env:RELAY_GATEWAY_TOKEN first
+python tools\smoke.py --mock-hands   # no real hands (any OS)
+python tools\smoke.py --no-action    # skip the shift key press
+```
+
+Requirements: `pip install -r services\gateway\requirements.txt -r services\parser\requirements.txt`.
+Exit code 0 means every executed check passed.
+
 ## Hands (Windows)
 
 The hands run **inside the packaged app** (above) — same Flask routes from

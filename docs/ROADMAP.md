@@ -69,6 +69,10 @@ secret.
 **Done when:** one command on a Windows PC produces the report; when the
 hands are not running it says exactly that instead of failing obscurely.
 
+- [x] **Status:** implemented (`tools/smoke.py`, `tests/mock_hands.py`);
+  verified against the mock hands. Run on the owner's PC: see
+  `docs/VERIFICATION.md` (WP0).
+
 ### WP0b — Takeover interlock (the user always wins)
 Safety feature, outranks every feature package below. Raised by the
 owner on 2026-10-13 after agent keystrokes landed in the wrong window

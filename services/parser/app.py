@@ -221,4 +221,11 @@ def parse():
 if __name__ == "__main__":
     from waitress import serve
 
-    serve(app, host="0.0.0.0", port=5011, threads=4)
+    # PARSER_HOST / PARSER_PORT exist so local tooling (tools/smoke.py)
+    # can run the parser loopback-only; the defaults are unchanged.
+    serve(
+        app,
+        host=os.environ.get("PARSER_HOST", "0.0.0.0"),
+        port=int(os.environ.get("PARSER_PORT", "5011")),
+        threads=4,
+    )
