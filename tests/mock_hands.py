@@ -1,7 +1,7 @@
 """Mock hands for tests and tools/smoke.py --mock-hands.
 
 Speaks the real hands HTTP contract (X-Secret / ?secret= auth, /health
-ungated, /screenshot PNG, move/click/type/key/scroll) without touching a
+ungated, /screenshot PNG, move/click/type/key/scroll/hotkey) without touching a
 real mouse, keyboard, or screen, so the gateway can be exercised on any OS.
 
 Run standalone:  python tests/mock_hands.py --port 5000
@@ -17,7 +17,7 @@ import zlib
 
 from flask import Flask, Response, jsonify, request
 
-HANDS_OPS = ("move", "click", "type", "key", "scroll")
+HANDS_OPS = ("move", "click", "type", "key", "scroll", "hotkey")
 
 
 def _tiny_png(width=4, height=3):

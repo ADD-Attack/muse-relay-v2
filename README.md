@@ -113,6 +113,18 @@ alerts (ntfy), Waitress, Tailscale Serve preferred over any public tunnel,
 no public URL at all when Tailscale is present. In that mode you copy its
 session secret into the gateway's `HANDS_SECRET` yourself.
 
+## Keyboard chords
+
+`/v1/act` accepts `{"op": "hotkey", "keys": ["win", "shift", "left"]}`
+(hands: `POST /hotkey`), pressed with `pyautogui.hotkey` — keys go down in
+order and come up in reverse. Names are checked against pyautogui's key
+list; an unknown name is a 400 that names it, and nothing is pressed. 1–6
+keys per chord. Single-key `{"op": "key"}` is unchanged.
+
+Useful chords: `["win", "shift", "left"]` moves the focused window to the
+monitor on the left (screenshots only see the primary display, so this is
+how to pull a window back into view); `["alt", "tab"]`; `["ctrl", "l"]`.
+
 ## Takeover interlock — the person at the PC always wins
 
 When you use the PC yourself, the agent stops driving — immediately and

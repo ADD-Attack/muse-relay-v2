@@ -11,7 +11,8 @@ into the gateway's environment). Agent calls are translated:
 
   GET  /v1/screen            -> GET  {HANDS_URL}/screenshot  (PNG bytes back)
   POST /v1/act {"op": ...}   -> POST {HANDS_URL}/<op>        (move/click/
-                                                              type/key/scroll)
+                                                              type/key/scroll/
+                                                              hotkey)
   GET  /v1/info              includes "control": "agent" | "yielded" |
                              "unknown" (the hands' takeover interlock)
 
@@ -33,7 +34,7 @@ HANDS_URL = os.environ.get("HANDS_URL", "http://host.docker.internal:5000").rstr
 HANDS_SECRET = os.environ.get("HANDS_SECRET", "")
 PARSER_URL = os.environ.get("PARSER_URL", "http://parser:5011").rstrip("/")
 
-HANDS_OPS = {"move", "click", "type", "key", "scroll"}
+HANDS_OPS = {"move", "click", "type", "key", "scroll", "hotkey"}
 HANDS_TIMEOUT = 30
 
 MAX_FAILS = 10
@@ -194,9 +195,9 @@ def screen():
 def act():
     """One desktop action, forwarded to the hands.
 
-    Body: {"op": "move"|"click"|"type"|"key"|"scroll", ...op params}
+    Body: {"op": "move"|"click"|"type"|"key"|"scroll"|"hotkey", ...op params}
     Op params match the hands API exactly: move/click {x, y}, type {text},
-    key {key}, scroll {clicks}.
+    key {key}, scroll {clicks}, hotkey {keys: ["win", "shift", "left"]}.
     """
     if not HANDS_SECRET:
         return jsonify({"ok": False, "error": "HANDS_SECRET not configured on gateway"}), 503
@@ -204,6 +205,8 @@ def act():
     op = body.get("op") or ""
     if op not in HANDS_OPS:
         return jsonify({"ok": False, "error": f"unknown op: {op!r}"}), 400
+    if op == "hotkey" and not isinstance(body.get("keys"), list):
+        return jsonify({"ok": False, "error": "hotkey needs keys: a list of key names"}), 400
     payload = {k: v for k, v in body.items() if k != "op"}
     try:
         r = requests.post(

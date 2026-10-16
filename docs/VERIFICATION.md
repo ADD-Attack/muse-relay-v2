@@ -48,3 +48,22 @@ no real hooks, cursor or desktop were involved.
 4. Feel check: with the app running, use the PC normally for a minute —
    mouse and typing must not feel laggy (the low-level hooks run in
    Python; lag would mean the hook callbacks are being starved).
+
+## WP5c — keyboard chords
+
+Verified automatically (`python -m pytest tests`): chord forwarded in order
+and lower-cased; unknown names / bad shapes rejected with 400 and nothing
+pressed; secret and takeover interlock enforced; `/key` unchanged; gateway
+op `hotkey` with token auth and 400 pass-through. Key names `win`, `shift`,
+`left`, `alt`, `f4` confirmed present in pyautogui 0.9.54's key list.
+
+**Unverified — run with a second monitor (rebuild the app first):**
+
+1. Put any window (e.g. Notepad) on the non-primary monitor and click it
+   so it has focus. Keep hands off afterwards (the takeover interlock
+   yields for 10 s after your click).
+2. From another tailnet device (or the PC itself after 10 s):
+   `curl -H "X-Relay-Token: <token>" -H "Content-Type: application/json" -d "{\"op\":\"hotkey\",\"keys\":[\"win\",\"shift\",\"left\"]}" http://<gateway>:5010/v1/act`
+   (use `right` instead of `left` if the primary monitor is to the right).
+3. Expect `{"ok": true, ...}`, the window on the primary monitor, and it
+   visible in `GET /v1/screen`.

@@ -56,6 +56,8 @@ WHAT MUSE CAN DO WITH IT (unchanged from cursor_relay.py)
   POST /click   {x, y, button}  click
   POST /type    {text}      type text
   POST /key     {key}       press a key ("enter", "tab", "esc", ...)
+  POST /hotkey  {keys}      press a chord, e.g. ["win", "shift", "left"]
+                            (keys held in order, released in reverse)
   POST /scroll  {clicks}    scroll
   GET  /status              who has control: {"control": "agent"|"yielded", ...}
   Every call except /health needs the secret, as header
@@ -597,6 +599,43 @@ def key():
     with TAKEOVER.agent_action():
         pyautogui.press(d["key"])
     return {"ok": True}
+
+
+MAX_HOTKEY_KEYS = 6
+
+
+@app.post("/hotkey")
+def hotkey():
+    """A key combination: {"keys": ["win", "shift", "left"]}.
+
+    Names are validated against pyautogui's key set; unknown names are a
+    400 and nothing is pressed. Single-key /key is unchanged.
+    """
+    d = request.get_json(force=True, silent=True) or {}
+    keys = d.get("keys")
+    if (
+        not isinstance(keys, list)
+        or not keys
+        or len(keys) > MAX_HOTKEY_KEYS
+        or not all(isinstance(k, str) and k for k in keys)
+    ):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"keys must be a list of 1-{MAX_HOTKEY_KEYS} key names",
+                }
+            ),
+            400,
+        )
+    keys = [k.lower() for k in keys]
+    valid = set(pyautogui.KEYBOARD_KEYS)
+    unknown = [k for k in keys if k not in valid]
+    if unknown:
+        return jsonify({"ok": False, "error": "unknown key name(s)", "unknown": unknown}), 400
+    with TAKEOVER.agent_action():
+        pyautogui.hotkey(*keys)
+    return {"ok": True, "keys": keys}
 
 
 @app.post("/scroll")

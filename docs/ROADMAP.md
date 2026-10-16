@@ -235,6 +235,10 @@ a non-primary monitor, `{"op": "hotkey", "keys": ["win", "shift",
 "left"]}` moves that window to the primary monitor and a following
 `/v1/screen` shows it there.
 
+- [x] **Status:** implemented (hands `POST /hotkey`, gateway op `hotkey`);
+  tests pass on Linux with stubbed input. **Unverified on Windows** (real
+  chord, second monitor) — see `docs/VERIFICATION.md` (WP5c).
+
 ### WP6 — Spike only: nested desktop + host/app agent split
 Research-only. Write `docs/SPIKE-NESTED-DESKTOP.md` assessing a
 Picture-in-Picture style nested desktop (agent works in a nested
