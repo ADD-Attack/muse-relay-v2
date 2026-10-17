@@ -32,8 +32,11 @@ the gateway is the only surface an agent talks to).
 
 Secrets in the packaged app:
 
-- The **gateway token** is minted fresh every launch and shown in the window
-  with a Copy button. It is never saved anywhere.
+- The **gateway token** persists per machine at
+  `%USERPROFILE%\.muse-relay-v2\gateway-token.txt` — generated on first run,
+  reused after that (delete the file to rotate it). It is shown in the window
+  with a Copy button so the operator can hand it to the agent once; the same
+  token then keeps working across relaunches.
 - The **hands secret** is owned by the app and persists per machine at
   `%USERPROFILE%\.muse-relay-v2\hands-secret.txt` — generated on first run,
   reused after that (delete the file to rotate it). The app feeds the same
@@ -169,8 +172,11 @@ app logs a warning). Guided check on the PC: `python tools\takeover_check.py`.
 
 - Nothing listens publicly by default. Preferred transport is Tailscale
   Serve (tailnet-only); a public tunnel is a fallback, never the design.
-- The gateway token is generated fresh on every launch and destroyed on
-  close. The hands secret in the packaged app is the one stored credential:
+- The gateway token is stored per machine in the packaged app
+  (`%USERPROFILE%\.muse-relay-v2\gateway-token.txt`), generated on first run
+  and reused across launches so an agent holding it is not locked out by a
+  relaunch; delete the file to rotate it. The hands secret in the packaged app
+  is the other stored credential:
   app-owned, kept in the user's profile (`%USERPROFILE%\.muse-relay-v2\`),
   and only ever used on the localhost gateway↔hands link — it never
   crosses the network. (The standalone hands app still uses a per-session
