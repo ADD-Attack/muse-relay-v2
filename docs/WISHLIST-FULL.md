@@ -253,3 +253,9 @@ Second Gemini reference: where #29 covers per-path coordinate physics, this cove
 
 ## Resolution note — #23/#25 GUI route DECIDED (2026-10-20 05:23 CDT)
 Christopher asked whether the relay app could get a GUI that "doesn't look like it's VBA" — the current window is Tkinter, and Tk's Windows widgets are that era's look. He picked the recommended route: a LOCAL WEB UI in an app window (locally served HTML/CSS/JS dashboard in a native window shell, pywebview-style), over PySide6/Qt and over a CustomTkinter reskin. This supersedes #23's earlier builder pin (Muse first build / Opus refinement): under his 2026-10-20 direction, ASTRA implements the GUI as Stage 3 of the R9 round (dashboard scope per #23), and because Astra is this round's builder, the independent pre-deploy review goes to a fresh Opus session. Stage order: R7.2 fix round → R9 motion/jiggler → R9 web GUI (deadline 2026-10-21 17:00 CDT).
+
+## #31 — Pause option on owner takeover (Christopher's direction 2026-10-21 06:16, for NEXT WEEK)
+When the owner takes over while Muse has hands, Muse still polls and watches. Today the takeover path effectively stops the run. Wanted: a PAUSE option — polling/watching suspends cleanly while the owner drives, and resumes when handed back, instead of running-vs-stopped being the only two states. Scoped for next week's round (owner's timing), not R11.
+
+## #32 — Polling tracker: visible watch state (Christopher's direction 2026-10-21 06:16, for NEXT WEEK)
+A visible tracker (relay GUI) showing whether Muse is currently watching/polling — live state, last poll time, paused vs watching — so the owner can SEE the watch state at a glance "without having to make sure" (his words, minutes after asking Muse "are you watching?" and learning the answer comes from session reports, not a live indicator). Pairs with #31: pause is the state, the tracker is how the owner sees it. Scoped for next week's round.
