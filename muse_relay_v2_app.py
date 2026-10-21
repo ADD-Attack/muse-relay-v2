@@ -509,7 +509,7 @@ def _app_dir():
 def _icon_path():
     for base in (getattr(sys, "_MEIPASS", None), _app_dir()):
         if base:
-            cand = os.path.join(base, "muse-avatar.ico")
+            cand = os.path.join(base, "relay.ico")  # R11 #8: line-family mark; muse-avatar is the assistant, not the relay
             if os.path.isfile(cand):
                 return cand
     return None

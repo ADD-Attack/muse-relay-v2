@@ -54,7 +54,12 @@ svg { width: 16px; height: 16px; flex: none; }
   position: relative; z-index: 2;
 }
 .brand { display: flex; align-items: center; gap: 12px; }
-.mark { width: 34px; height: 34px; filter: drop-shadow(0 0 12px rgba(124, 242, 214, 0.35)); }
+/* R11 #8: one line-icon family. Accent green = active/running, muted slate = idle/free. */
+.ico { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round; color: var(--idle); transition: color .3s; }
+.mark-tile { width: 34px; height: 34px; border-radius: 9px; background: #141922; border: 1px solid var(--line);
+  display: grid; place-items: center; }
+.mark { width: 24px; height: 24px; color: var(--ok); }
 .brand-name { font: 600 17px/1.1 var(--display); letter-spacing: 0.2px; }
 .brand-sub { color: var(--muted); font-size: 11.5px; letter-spacing: 0.6px; text-transform: uppercase; margin-top: 2px; }
 
@@ -157,7 +162,9 @@ body:not([data-phase="idle"]) .banner { display: none; }
   font: 600 12px var(--sans); letter-spacing: 0.7px; text-transform: uppercase; color: var(--muted);
   margin-bottom: 12px;
 }
-.card-title svg { color: var(--accent); }
+body[data-phase="running"] .card-title .ico { color: var(--ok); }
+.card-control .card-title .ico { color: var(--idle); }
+.card-control[data-held="1"] .card-title .ico { color: var(--ok); }
 .spacer { flex: 1; }
 
 /* ----------------------------------------------------------------- tiles */
@@ -169,15 +176,11 @@ body:not([data-phase="idle"]) .banner { display: none; }
 .tile-head { display: flex; align-items: center; gap: 10px; }
 .tile-name { font: 600 15px var(--display); }
 .port { margin-left: auto; color: var(--faint); font: 12px var(--mono); }
-.orb { width: 11px; height: 11px; border-radius: 50%; background: var(--tile-color, var(--idle)); box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03); position: relative; }
+.tile-ico { width: 20px; height: 20px; color: var(--tile-color, var(--idle)); }
 .tile[data-state="ok"] { --tile-color: var(--ok); }
-.tile[data-state="ok"] .orb::after {
-  content: ""; position: absolute; inset: -4px; border-radius: 50%;
-  border: 2px solid var(--ok); opacity: 0; animation: ring 2.4s ease-out infinite;
-}
 .tile[data-state="down"] { --tile-color: var(--bad); border-color: rgba(255, 92, 108, 0.3); }
 .tile[data-state="starting"] { --tile-color: var(--warn); }
-.tile[data-state="starting"] .orb { animation: pulse 1.1s ease-in-out infinite; }
+.tile[data-state="starting"] .tile-ico { animation: pulse 1.1s ease-in-out infinite; }
 .tile-state { margin-top: 10px; font: 600 20px/1.1 var(--display); letter-spacing: 0.1px; }
 .tile[data-state="ok"] .tile-state { color: var(--ok); }
 .tile[data-state="down"] .tile-state { color: var(--bad); }
@@ -298,7 +301,6 @@ body:not([data-phase="idle"]) .banner { display: none; }
 
 /* ------------------------------------------------------------- keyframes */
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@keyframes ring { 0% { transform: scale(0.6); opacity: 0.7; } 100% { transform: scale(2.1); opacity: 0; } }
 @keyframes fresh { 0% { background: rgba(124, 242, 214, 0.14); } 100% { background: transparent; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }

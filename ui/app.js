@@ -118,6 +118,7 @@
   function renderClaim(m) {
     const claim = m && m.claim;
     $("claim").dataset.held = claim ? "1" : "0";
+    $("card-control").dataset.held = claim ? "1" : "0";  // R11 #8: icon green while held
     if (claim) {
       setText($("claim-holder"), claim.holder);
       setText($("claim-purpose"), claim.purpose || "No purpose given");
