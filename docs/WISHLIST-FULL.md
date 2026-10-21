@@ -259,3 +259,9 @@ When the owner takes over while Muse has hands, Muse still polls and watches. To
 
 ## #32 — Polling tracker: visible watch state (Christopher's direction 2026-10-21 06:16, for NEXT WEEK)
 A visible tracker (relay GUI) showing whether Muse is currently watching/polling — live state, last poll time, paused vs watching — so the owner can SEE the watch state at a glance "without having to make sure" (his words, minutes after asking Muse "are you watching?" and learning the answer comes from session reports, not a live indicator). Pairs with #31: pause is the state, the tracker is how the owner sees it. Scoped for next week's round.
+
+## #33 — Recent Acts: owner-aborted types show as "failed" (Christopher, 2026-10-21 06:51, photo of R11 GUI)
+A type op aborted by the owner-provenance guard (owner became active — the safety system working) renders in Recent Acts as a red "failed" receipt, indistinguishable from a real failure. Owner photo shows both the 2026-10-21 Phase-2 verification abort (4e094c9b) and a latency-test abort labeled "failed". Wanted: a distinct state for guard aborts (e.g. "aborted — owner") with its own treatment, so the acts ledger reads true: failed = the relay failed; aborted = the owner took over, by design.
+
+## #34 — Hands Control claim countdown doesn't tick in real time (Christopher, 2026-10-21 06:51)
+The claim card's "expires in 12m 36s" is static — rendered once and never updated while the page sits open, so the displayed remaining lease drifts from reality (the underlying lease itself is fine; constants 900/30/3600 untouched per R11 scope). Wanted: the countdown ticks live (or the card refreshes on a short interval) so the owner can trust what the GUI shows about the claim state. Pairs with #32 (polling tracker): visible state must be LIVE state.
