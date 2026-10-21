@@ -253,7 +253,7 @@ def _yield_if_active():
     except (TypeError, ValueError):
         threshold = 5.0
     locked, idle_seconds = _probe_lock_state()
-    # R9 (#28): input inside a recorded jiggler span is ours, not the
+    # R9 (#28): input inside a recorded resting-hand span is ours, not the
     # owner's — owner idle keeps counting from the owner's last input.
     idle_seconds = _LEDGER.owner_idle(idle_seconds, _tick_ms())
     if locked is True:
@@ -638,11 +638,6 @@ def _human_motion_default():
     return _flag("HANDS_HUMAN_MOTION", "human_motion", True)
 
 
-def _jiggler_enabled():
-    """R9 jiggler flag (#28): default OFF."""
-    return _flag("HANDS_JIGGLER", "jiggler_enabled", False)
-
-
 def _tick_ms():
     """The GetTickCount clock that GetLastInputInfo's dwTime lives on;
     a monotonic stand-in off Windows (tests, Linux)."""
@@ -655,9 +650,9 @@ def _tick_ms():
 
 
 # One input stream at a time, with hand-travel between devices (#30 rule
-# 4). Every injecting op holds it; the jiggler only ever try-acquires.
+# 4). Every injecting op holds it; the resting hand only ever try-acquires.
 _INPUT = motion.InputMutex(clock=lambda: time.monotonic(), sleep=lambda s: time.sleep(s))
-# Jiggler injections, so the yield probe can tell them from the owner (#28).
+# Resting-hand injections, so the yield probe can tell them from the owner (#28).
 _LEDGER = motion.SelfInputLedger()
 
 
@@ -669,9 +664,12 @@ class _input:
 
     def __enter__(self):
         _INPUT.acquire(self.kind, random)
+        _resting.act_begin()
         return self
 
     def __exit__(self, *exc):
+        # R11: every real agent act resets the resting-hand ramp to zero.
+        _resting.act_end(time.monotonic())
         _INPUT.release(self.kind)
         return False
 
@@ -917,11 +915,8 @@ def type_text():
                     pass
         return "paste"
 
-    _INPUT.acquire("keys", random)
-    try:
+    with _input("keys"):
         method_used, note = _type_dispatch(method, _keys, _paste, text)
-    finally:
-        _INPUT.release("keys")
 
     if method_used == "keys" and typed < len(text):
         return (
@@ -1468,109 +1463,168 @@ def _display_state(idle_seconds):
             "display_asleep": asleep}
 
 
-# ---- R9 idle jiggler (#28 + #30 idle drift) -------------------------------
-# One decision per tick (step), driven by OWNER idle (jiggler spans
-# excluded via _LEDGER). An episode begins after a per-episode 30-60 s of
-# owner idle; jiggle size and spacing decay with idle length
-# (motion.plan_jiggle). Any owner input ends the episode at once: the OS
-# idle drops below the start threshold, or the pointer is no longer where
-# the jiggler left it, or it moves under the jiggler mid-path. Never runs
-# while locked, while the probe is blind, or while an act holds _INPUT.
+# ---- R11 resting hand (replaces the R9 idle jiggler) ----------------------
+# While the agent HOLDS hands control and is idle between acts, the pointer
+# floats like a hand resting on the mouse: a 1-3 px local float within
+# motion.REST_RADIUS_PX of where it rests. Intensity ramps 0 -> full over
+# motion.REST_RAMP_S from the end of each act (motion.rest_intensity); any
+# act resets it. No toggle, no timeout. The gateway pushes the claim state
+# here (/resting/claim) since only it knows about claims; the lease itself
+# is untouched. Owner input ends the episode at once (OS input newer than
+# the episode baseline outside our own ledger spans, or the pointer not
+# where we left it) and the hand stays still until the next agent act.
+# Never moves while locked, while the probe is blind, or during an act.
 
-class _Jiggler:
-    POLL = 0.5
+class _RestingHand:
+    POLL = 0.1
 
-    def __init__(self, rng=None):
+    def __init__(self, rng=None, clock=time.monotonic):
         self.rng = rng if rng is not None else random
-        self.active = False
-        self.start_after = None
-        self.next_at = 0.0
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.claim_until = None  # monotonic expiry of the held claim
+        self.claim_seq = -1
+        self.last_act_end = clock()
+        self.acting = 0
+        self.owner_stopped = False
+        self.anchor = None
+        self.offset = (0.0, 0.0)
         self.last_pos = None
+        self.baseline_tick = None
+        self.next_at = 0.0
         self.moves = 0
         self.kills = 0
         self._stop = threading.Event()
         self._thread = None
 
+    # -- inputs ------------------------------------------------------------
+    def act_begin(self):
+        with self._lock:
+            self.acting += 1
+            self._end()
+
+    def act_end(self, now):
+        with self._lock:
+            self.acting = max(0, self.acting - 1)
+            self.last_act_end = now
+            self.owner_stopped = False
+            self._end()
+
+    def set_claim(self, held, expires_in, seq, now):
+        """Gateway claim push. Stale (out-of-order) pushes are ignored."""
+        with self._lock:
+            if seq <= self.claim_seq:
+                return False
+            self.claim_seq = seq
+            was_held = self.claim_held(now)
+            if held and expires_in > 0:
+                self.claim_until = now + float(expires_in)
+                if not was_held:
+                    self.last_act_end = now  # fresh claim: ramp from grant
+                    self.owner_stopped = False
+            else:
+                self.claim_until = None
+                self._end()
+            return True
+
+    def claim_held(self, now):
+        return self.claim_until is not None and now < self.claim_until
+
+    def intensity(self, now):
+        if self.acting or not self.claim_held(now):
+            return 0.0
+        return motion.rest_intensity(now - self.last_act_end)
+
+    # -- episode -------------------------------------------------------------
     def _end(self, killed=False):
-        if self.active and killed:
+        if killed and self.anchor is not None:
             self.kills += 1
-        self.active = False
-        self.start_after = None
+            self.owner_stopped = True
+        self.anchor = None
+        self.offset = (0.0, 0.0)
         self.last_pos = None
+        self.baseline_tick = None
 
     def status(self):
-        return {
-            "enabled": _jiggler_enabled(),
-            "active": self.active,
-            "moves": self.moves,
-            "owner_kills": self.kills,
-        }
+        now = self._clock()
+        with self._lock:
+            return {
+                "active": self.anchor is not None and self.claim_held(now) and not self.acting,
+                "claim_held": self.claim_held(now),
+                "intensity": round(self.intensity(now), 3),
+                "moves": self.moves,
+                "owner_kills": self.kills,
+            }
 
     def step(self, now):
         """One decision. Returns seconds to wait before the next step."""
-        if not _jiggler_enabled():
-            self._end()
-            return 1.0
+        with self._lock:
+            if not self.claim_held(now):
+                self._end()
+                return 0.5
+            if self.acting or self.owner_stopped:
+                return self.POLL
         locked, raw_idle = _probe_lock_state()
-        if locked is not False or raw_idle is None:
-            self._end()
-            return 2.0
-        idle = _LEDGER.owner_idle(raw_idle, _tick_ms())
-        if self.start_after is None:
-            self.start_after = motion.jiggle_start_after(self.rng)
-        if idle < self.start_after:
-            self._end(killed=True)  # owner input reset the idle clock
-            return self.POLL
-        pos = tuple(pyautogui.position())
-        if self.active and self.last_pos is not None and pos != self.last_pos:
-            self._end(killed=True)  # pointer moved, not by us
-            return self.POLL
-        if not self.active:
-            self.active = True
-            self.next_at = now
-        if now < self.next_at:
-            return min(self.POLL, self.next_at - now)
+        now_tick = _tick_ms()
+        with self._lock:
+            if locked is not False or raw_idle is None:
+                self._end()
+                return 1.0
+            pos = tuple(pyautogui.position())
+            if self.anchor is None:
+                self.anchor = pos
+                self.last_pos = pos
+                self.offset = (0.0, 0.0)
+                self.baseline_tick = now_tick
+                self.next_at = now
+                return self.POLL
+            if _LEDGER.owner_input_since(self.baseline_tick, raw_idle, now_tick) or pos != self.last_pos:
+                self._end(killed=True)  # the owner's hand is on the mouse
+                return self.POLL
+            if now < self.next_at:
+                return min(self.POLL, self.next_at - now)
+            offset, wait = motion.plan_rest(self.offset, self.intensity(now), self.rng)
+            self.next_at = now + wait
+            target = (int(round(self.anchor[0] + offset[0])), int(round(self.anchor[1] + offset[1])))
+            self.offset = offset
+            if target == pos:
+                return self.POLL
         if not _INPUT.try_acquire():
             return self.POLL  # an act is injecting; never contend with it
         try:
-            dx, dy, wait = motion.plan_jiggle(idle - self.start_after, self.rng)
-            landed = self._move(pos, (pos[0] + dx, pos[1] + dy))
+            landed = self._move(target)
         finally:
             _INPUT.release("mouse")
-        if landed is None:
-            self._end(killed=True)
-            return self.POLL
-        self.last_pos = landed
-        self.moves += 1
-        self.next_at = now + wait
+        with self._lock:
+            if landed is None:
+                self._end(killed=True)
+                return self.POLL
+            if self.anchor is not None:
+                self.last_pos = landed
+                self.moves += 1
         return self.POLL
 
-    def _move(self, start, target):
-        """Inject one jiggle; None if the owner moved the pointer mid-path."""
-        tx, ty = int(round(target[0])), int(round(target[1]))
-        steps = motion.plan_move(start[0], start[1], tx, ty, self.rng)
-        planned_ms = int(sum(st[2] for st in steps) * 1000)
+    def _move(self, target):
+        """Inject one float step; None if the owner moved the pointer."""
         t0 = _tick_ms()
         # Record BEFORE injecting: a concurrent yield probe must already
         # see this span as ours.
-        _LEDGER.record(t0, (t0 + planned_ms + 250) & 0xFFFFFFFF)
-        for sx, sy, delay in steps:
-            pyautogui.moveTo(sx, sy, duration=0)
-            time.sleep(delay)
-            px, py = pyautogui.position()
-            if abs(px - round(sx)) > 1 or abs(py - round(sy)) > 1:
-                _LEDGER.truncate_last(_tick_ms())
-                return None
+        _LEDGER.record(t0, (t0 + 250) & 0xFFFFFFFF)
+        pyautogui.moveTo(target[0], target[1], duration=0)
+        px, py = pyautogui.position()
         _LEDGER.truncate_last((_tick_ms() + 50) & 0xFFFFFFFF)
-        return tuple(pyautogui.position())
+        if abs(px - target[0]) > 1 or abs(py - target[1]) > 1:
+            return None
+        return (px, py)
 
     def _run(self):
         while not self._stop.is_set():
             try:
-                wait = self.step(time.monotonic())
+                wait = self.step(self._clock())
             except Exception as exc:  # a probe/pyautogui failure must not kill the thread
-                file_log(f"jiggler step failed: {exc}")
-                self._end()
+                file_log(f"resting hand step failed: {exc}")
+                with self._lock:
+                    self._end()
                 wait = 2.0
             self._stop.wait(wait)
 
@@ -1578,48 +1632,51 @@ class _Jiggler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="hands-jiggler", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="hands-resting", daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
-        self._end()
+        with self._lock:
+            self._end()
 
 
-_jiggler = _Jiggler()
+_resting = _RestingHand()
 
 
-def start_jiggler():
-    """Start the jiggler thread (it idles unless the flag is on)."""
-    _jiggler.start()
+def start_resting_hand():
+    """Start the resting-hand thread (it idles unless a claim is held)."""
+    _resting.start()
 
 
-def stop_jiggler():
-    _jiggler.stop()
+def stop_resting_hand():
+    _resting.stop()
 
 
-@app.get("/jiggler")
-def jiggler_get():
-    return {"ok": True, **_jiggler.status()}
+@app.get("/resting")
+def resting_get():
+    return {"ok": True, **_resting.status()}
 
 
-@app.post("/jiggler")
-def jiggler_set():
-    """{enabled: bool} — persisted to the hands config (jiggler_enabled).
-    An env HANDS_JIGGLER setting still wins over it."""
+@app.post("/resting/claim")
+def resting_claim():
+    """Gateway push: {held: bool, expires_in: seconds, seq: int}."""
     d = request.get_json(force=True, silent=True) or {}
-    enabled = d.get("enabled")
-    if not isinstance(enabled, bool):
-        return jsonify({"ok": False, "error": "enabled must be true or false"}), 400
-    # Merge into the file as it is NOW: the app shares this config file,
-    # so writing back a stale in-memory copy could drop its keys.
-    fresh = _load_config()
-    fresh["jiggler_enabled"] = enabled
-    _save_config(fresh)
-    _cfg["jiggler_enabled"] = enabled
-    if enabled:
-        start_jiggler()
-    return {"ok": True, **_jiggler.status()}
+    held, seq = d.get("held"), d.get("seq")
+    expires_in = d.get("expires_in", 0)
+    if (
+        not isinstance(held, bool)
+        or not isinstance(seq, int) or isinstance(seq, bool)
+        or not isinstance(expires_in, (int, float)) or isinstance(expires_in, bool)
+        or not math.isfinite(expires_in)
+    ):
+        return jsonify({"ok": False, "error": "need held (bool), seq (int), expires_in (number)"}), 400
+    applied = _resting.set_claim(held, float(expires_in), seq, time.monotonic())
+    if held:
+        start_resting_hand()
+    return {"ok": True, "applied": applied, **_resting.status()}
+
+
 def _probe_locked():
     """Lock-only check for the mid-type boundary (R7.2 fix, Finding 2).
 
@@ -1638,10 +1695,10 @@ def state():
         locked, idle_seconds = None, None
     body = {"ok": True, "platform": platform, "locked": locked, "idle_seconds": idle_seconds}
     body["owner_idle_seconds"] = _LEDGER.owner_idle(idle_seconds, _tick_ms())
-    body["jiggler"] = _jiggler.status()
+    body["resting_hand"] = _resting.status()
     body["human_motion"] = _human_motion_default()
     # Display sleep follows the OS idle clock, which injected input
-    # (incl. the jiggler) does reset — so the raw idle is the right one.
+    # (incl. the resting hand) does reset — so the raw idle is the right one.
     body.update(_display_state(idle_seconds))
     body.update(_probe_health())
     return body
@@ -2537,7 +2594,7 @@ class RelayApp:
         self.root.clipboard_append(text)
 
     def _run_server(self):
-        start_jiggler()  # idles unless the jiggler flag is on
+        start_resting_hand()  # idles unless a claim is held
         try:
             try:
                 from waitress import create_server

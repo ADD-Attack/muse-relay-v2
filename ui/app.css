@@ -136,10 +136,11 @@ body:not([data-phase="idle"]) .banner { display: none; }
     "feed    log     log";
 }
 .tiles { grid-area: tiles; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.card-control { grid-area: control; }
-.card-desktop { grid-area: desktop; }
-.card-token { grid-area: token; }
-.card-feed { grid-area: feed; }
+/* R11: cards are sized to their content (no stretched empty bodies). */
+.card-control { grid-area: control; align-self: start; }
+.card-desktop { grid-area: desktop; align-self: start; }
+.card-token { grid-area: token; align-self: start; }
+.card-feed { grid-area: feed; align-self: start; max-height: 100%; }
 .card-log { grid-area: log; }
 
 .card, .tile {
@@ -199,7 +200,9 @@ body:not([data-phase="idle"]) .banner { display: none; }
 .good { color: var(--ok); }
 .bad { color: var(--bad); }
 .warnc { color: var(--warn); }
-.jiggler { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+.mode-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mode-row .chip { flex: none; }
+.mode-meta { color: var(--faint); font-size: 11.5px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ----------------------------------------------------------------- chips */
 .chip { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font: 600 11.5px var(--sans); letter-spacing: 0.2px; border: 1px solid transparent; }
@@ -243,7 +246,7 @@ body:not([data-phase="idle"]) .banner { display: none; }
 }
 .filter:focus { outline: none; border-color: var(--accent-2); }
 .log {
-  flex: 1; min-height: 120px; overflow: auto; padding: 10px 12px; border-radius: 10px;
+  flex: 1; min-height: 80px; overflow: auto; padding: 10px 12px; border-radius: 10px;
   background: rgba(0, 0, 0, 0.32); border: 1px solid var(--line);
   font: 400 12px/1.6 var(--mono); color: #c3c9d6;
 }
@@ -301,8 +304,18 @@ body:not([data-phase="idle"]) .banner { display: none; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 
-@media (max-width: 1100px) {
-  .grid { grid-template-columns: 1fr 1fr; grid-template-areas: "tiles tiles" "control desktop" "token token" "feed log"; overflow: auto; }
+/* R11: the default/minimum window (980 px) keeps the three-column grid.
+   Narrower (browser fallback only) stacks into two columns; that layout
+   has FOUR rows, and only the last one flexes — the R10 query reused the
+   three-row template, so the token row got the 1fr and collapsed under
+   Recent acts / Log at small sizes. */
+@media (max-width: 960px) {
+  .grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "tiles tiles" "control desktop" "token token" "feed log";
+    overflow: auto;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

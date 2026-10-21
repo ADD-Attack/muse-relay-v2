@@ -140,12 +140,33 @@
     } else {
       res.hidden = true;
     }
+    // R11 (#5): watcher (eyes only) vs hands control (claim held).
+    const mode = m && m.mode;
+    const watchers = (m && m.watchers) || [];
+    let modeText = "No agent";
+    let modeCls = "chip chip-quiet";
+    if (mode === "control") {
+      modeText = "Hands control";
+      modeCls = "chip chip-held";
+    } else if (mode === "watcher") {
+      modeText = "Watcher";
+      modeCls = "chip chip-info";
+    } else if (!m) {
+      modeText = "—";
+    }
+    setText($("agent-mode"), modeText, modeCls);
+    $("agent-mode").title = watchers.length ? `Watching (eyes only): ${watchers.join(", ")}` : "Watcher: eyes only (screen polling, no actuation). Hands control: claim held.";
+    const wt = m && m.watcher_timeout_s;
+    const parts = [];
+    if (watchers.length) parts.push(mode === "watcher" ? watchers.join(", ") : `${watchers.length} watching`);
+    parts.push(wt == null ? "watcher timeout —" : `watcher timeout ${dur(wt)}`);
+    setText($("watcher-setting"), parts.join(" · "));
   }
 
   function renderDesktop(m) {
     const pc = m && m.pc;
     if (!pc) {
-      for (const id of ["pc-lock", "pc-idle", "pc-display", "pc-probe", "pc-motion"]) {
+      for (const id of ["pc-lock", "pc-idle", "pc-display", "pc-probe", "pc-motion", "pc-resting"]) {
         setText($(id), m ? "unknown" : "—", "");
       }
     } else {
@@ -163,19 +184,12 @@
       setText($("pc-probe"), probe[0], probe[1]);
       setText($("pc-motion"), pc.human_motion == null ? "unknown" : pc.human_motion ? "Human-like" : "Direct", "");
     }
-    const jig = view_jiggler;
-    const sw = $("jiggler");
-    sw.disabled = !started || !jig;
-    if (jig && jig.enabled != null && !sw.matches(":focus")) sw.checked = !!jig.enabled;
-    let label = "off";
-    let cls = "chip chip-quiet";
-    if (jig && jig.enabled) {
-      label = jig.active ? `drifting · ${jig.moves ?? 0} moves` : "armed";
-      cls = jig.active ? "chip chip-info" : "chip chip-ok";
+    // R11: resting hand is a read-only state, not a toggle.
+    const rest = pc && pc.resting_hand;
+    if (pc) {
+      setText($("pc-resting"), !rest || rest.active == null ? "unknown" : rest.active ? "Active" : "Inactive", rest && rest.active ? "good" : "");
     }
-    setText($("jiggler-state"), label, cls);
   }
-  let view_jiggler = null;
 
   function renderFeed(m) {
     const body = $("feed");
@@ -296,7 +310,6 @@
     }
     const auto = $("autostart");
     if (!auto.matches(":focus")) auto.checked = !!view.autostart;
-    view_jiggler = view.jiggler;
     renderTiles(view);
     renderClaim(view.model);
     renderDesktop(view.model);
@@ -349,17 +362,6 @@
       toast("Start on login could not be changed", true);
     } else {
       toast(want ? "Will start on login (and wait for Start)" : "Start on login turned off");
-    }
-  });
-
-  $("jiggler").addEventListener("change", async (e) => {
-    const want = e.target.checked;
-    const { data } = await api("/api/jiggler", { method: "POST", body: { enabled: want } });
-    if (!data.ok) {
-      e.target.checked = !want;
-      toast(`Jiggler: ${data.message || "not changed"}`, true);
-    } else {
-      toast(want ? "Idle jiggler on" : "Idle jiggler off");
     }
   });
 

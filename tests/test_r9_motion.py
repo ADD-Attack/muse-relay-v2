@@ -1,4 +1,6 @@
-"""R9 Stage 2 — human-like pointer system + idle jiggler (#24, #28-#30).
+"""R9 Stage 2 — human-like pointer system (#24, #28-#30). The R9 idle
+jiggler tests were retired in R11 (replaced by the resting hand; see
+tests/test_r11_resting_watch.py).
 
 Planners are tested directly (hands/motion.py, pure); the hands
 integration is tested with pyautogui/time stubbed. Windows-live feel is
@@ -170,28 +172,6 @@ def test_scroll_chunks(motion):
     assert motion.plan_scroll(0, rng) == []
 
 
-# ================================================================ jiggler
-
-def test_jiggle_intensity_decays(motion):
-    def amp(e):
-        return statistics.mean(math.hypot(*motion.plan_jiggle(e, random.Random(s))[:2])
-                               for s in range(400))
-
-    def wait(e):
-        return statistics.mean(motion.plan_jiggle(e, random.Random(s))[2] for s in range(400))
-
-    assert amp(0) > amp(600) * 2
-    assert wait(1200) > wait(0) * 4
-    late = [math.hypot(*motion.plan_jiggle(3600, random.Random(s))[:2]) for s in range(200)]
-    assert all(1.0 <= a <= 3.2 for a in late)  # micro-movements after long idle
-    assert len({round(a, 3) for a in late}) > 150  # never a fixed pattern
-
-
-def test_jiggle_start_after_range(motion):
-    rng = random.Random(1)
-    assert all(30 <= motion.jiggle_start_after(rng) <= 60 for _ in range(200))
-
-
 # ========================================================= self-input ledger
 
 def test_ledger_excludes_jiggler_spans(motion):
@@ -317,7 +297,6 @@ def rig(hands, monkeypatch):
     monkeypatch.setattr(hands, "_LEDGER", hands.motion.SelfInputLedger())
     monkeypatch.setattr(hands, "_INPUT", hands.motion.InputMutex(sleep=lambda s: None))
     monkeypatch.delenv("HANDS_HUMAN_MOTION", raising=False)
-    monkeypatch.delenv("HANDS_JIGGLER", raising=False)
     return pag, clock
 
 
@@ -329,14 +308,11 @@ def _call(hands, fn, path, body):
 
 def test_flags_defaults(hands, monkeypatch):
     monkeypatch.delenv("HANDS_HUMAN_MOTION", raising=False)
-    monkeypatch.delenv("HANDS_JIGGLER", raising=False)
     monkeypatch.setattr(hands, "_cfg", {})
     assert hands._human_motion_default() is True
-    assert hands._jiggler_enabled() is False
     monkeypatch.setenv("HANDS_HUMAN_MOTION", "0")
-    monkeypatch.setenv("HANDS_JIGGLER", "1")
     assert hands._human_motion_default() is False
-    assert hands._jiggler_enabled() is True
+    assert not hasattr(hands, "_jiggler_enabled")  # R11: no jiggler flag
 
 
 def test_human_click_lands_in_box_within_budget(hands, rig):
@@ -401,13 +377,13 @@ def test_human_scroll_is_chunked(hands, rig):
     assert sum(chunks) == -9 and len(chunks) > 1
 
 
-def test_yield_ignores_jiggler_but_not_owner(hands, rig, monkeypatch):
+def test_yield_ignores_resting_hand_but_not_owner(hands, rig, monkeypatch):
     monkeypatch.setattr(hands, "_tick_ms", lambda: 70_000)
     monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 60.0))
     with hands.app.test_request_context("/click", method="POST", json={}):
         assert hands._yield_if_active() is None  # owner baseline learned
     hands._LEDGER.record(69_000, 69_500)
-    monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 0.6))  # our jiggle
+    monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 0.6))  # our resting-hand move
     with hands.app.test_request_context("/click", method="POST", json={}):
         assert hands._yield_if_active() is None
     monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 0.05))  # owner
@@ -417,125 +393,12 @@ def test_yield_ignores_jiggler_but_not_owner(hands, rig, monkeypatch):
     assert status == 409
 
 
-def _jig(hands, monkeypatch, idle, locked=False):
-    monkeypatch.setenv("HANDS_JIGGLER", "1")
-    monkeypatch.setattr(hands, "_probe_lock_state", lambda: (locked, idle))
-    monkeypatch.setattr(hands, "_tick_ms", lambda: 500_000)
-    j = hands._Jiggler(rng=random.Random(7))
-    j.start_after = 45.0
-    return j
-
-
-def test_jiggler_off_by_default_never_moves(hands, rig, monkeypatch):
-    pag, _ = rig
-    monkeypatch.setattr(hands, "_cfg", {})
-    monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 999.0))
-    j = hands._Jiggler(rng=random.Random(1))
-    for i in range(10):
-        j.step(1000.0 + i)
-    assert pag.events == []
-
-
-def test_jiggler_waits_for_idle_then_moves_and_records_span(hands, rig, monkeypatch):
-    pag, _ = rig
-    j = _jig(hands, monkeypatch, idle=10.0)
-    j.step(1000.0)
-    assert pag.events == [] and not j.active
-    j = _jig(hands, monkeypatch, idle=120.0)
-    j.step(1000.0)
-    assert j.active and j.moves == 1 and pag.events
-    assert hands._LEDGER._spans  # the injection is on the self ledger
-
-
-def test_jiggler_killed_by_owner_pointer_move(hands, rig, monkeypatch):
-    pag, _ = rig
-    j = _jig(hands, monkeypatch, idle=120.0)
-    j.step(1000.0)
-    assert j.active
-    pag.pos = (pag.pos[0] + 200, pag.pos[1])  # the owner grabs the mouse
-    before = len(pag.events)
-    j.step(5000.0)
-    assert not j.active and j.kills == 1 and len(pag.events) == before
-
-
-def test_jiggler_aborts_mid_path_when_owner_fights(hands, rig, monkeypatch):
-    pag, _ = rig
-    j = _jig(hands, monkeypatch, idle=120.0)
-    j.start_after = 45.0
-    # force a long lazy drift so the path has several steps
-    monkeypatch.setattr(hands.motion, "plan_jiggle", lambda e, rng: (40.0, 0.0, 5.0))
-    pag.fight_at = 2
-    j.step(1000.0)
-    moves = [e for e in pag.events if e[0] == "move"]
-    assert len(moves) == 2 and not j.active and j.kills == 1
-
-
-def test_jiggler_stops_when_owner_idle_resets(hands, rig, monkeypatch):
-    pag, _ = rig
-    j = _jig(hands, monkeypatch, idle=120.0)
-    j.step(1000.0)
-    monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 0.3))
-    j.step(1001.0)
-    assert not j.active and j.kills == 1
-
-
-def test_jiggler_idle_when_locked_or_blind(hands, rig, monkeypatch):
-    pag, _ = rig
-    for locked, idle in ((True, 500.0), (None, None), (False, None)):
-        j = _jig(hands, monkeypatch, idle=idle, locked=locked)
-        j.step(1000.0)
-    assert pag.events == []
-
-
-def test_jiggler_never_contends_with_an_op(hands, rig, monkeypatch):
-    pag, _ = rig
-    j = _jig(hands, monkeypatch, idle=120.0)
-    hands._INPUT.acquire("keys", random.Random(1))
-    try:
-        t = threading.Thread(target=lambda: j.step(1000.0))
-        t.start()
-        t.join()
-    finally:
-        hands._INPUT.release("keys")
-    assert pag.events == []
-
-
-def test_jiggler_intensity_decays_in_practice(hands, rig, monkeypatch):
-    pag, _ = rig
-    monkeypatch.setenv("HANDS_JIGGLER", "1")
-    monkeypatch.setattr(hands, "_tick_ms", lambda: 900_000)
-    early, late = [], []
-    for s in range(60):
-        for idle, bucket in ((60.0, early), (3000.0, late)):
-            monkeypatch.setattr(hands, "_probe_lock_state", lambda i=idle: (False, i))
-            pag.pos = (500, 500)
-            j = hands._Jiggler(rng=random.Random(s))
-            j.start_after = 45.0
-            j.step(0.0)
-            bucket.append(math.hypot(pag.pos[0] - 500, pag.pos[1] - 500))
-    assert statistics.mean(early) > statistics.mean(late) * 2
-
-
-def test_jiggler_endpoint_merges_config(hands, rig, monkeypatch, tmp_path):
-    cfg = tmp_path / "muse_relay_config.json"
-    cfg.write_text(json.dumps({"ntfy_topic": "keep-me", "other": 1}))
-    monkeypatch.setattr(hands, "_CONFIG_PATH", str(cfg))
-    monkeypatch.setattr(hands, "_cfg", {})
-    monkeypatch.setattr(hands, "start_jiggler", lambda: None)
-    body = _call(hands, hands.jiggler_set, "/jiggler", {"enabled": True})
-    assert body["ok"] and body["enabled"] is True
-    saved = json.loads(cfg.read_text())
-    assert saved == {"ntfy_topic": "keep-me", "other": 1, "jiggler_enabled": True}
-    with hands.app.test_request_context("/jiggler", method="POST", json={"enabled": "yes"}):
-        resp, status = hands.jiggler_set()
-    assert status == 400
-
-
-def test_state_reports_motion_and_jiggler(hands, rig, monkeypatch):
+def test_state_reports_motion_and_resting_hand(hands, rig, monkeypatch):
     monkeypatch.setattr(hands, "_probe_lock_state", lambda: (False, 3.0))
     monkeypatch.setattr(hands, "_probe_display_raw",
                         lambda: {"screensaver": None, "display_off_after_seconds": None})
     body = hands.state()
     assert body["human_motion"] is True
-    assert set(body["jiggler"]) == {"enabled", "active", "moves", "owner_kills"}
+    assert "jiggler" not in body
+    assert set(body["resting_hand"]) == {"active", "claim_held", "intensity", "moves", "owner_kills"}
     assert body["owner_idle_seconds"] == 3.0

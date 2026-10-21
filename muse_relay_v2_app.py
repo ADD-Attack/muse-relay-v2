@@ -300,17 +300,33 @@ def _finite_or_none(value):
     return None
 
 
-def _jiggler_or_none(value):
-    """{enabled, active, moves, owner_kills} with checked types, or None."""
+def _resting_or_none(value):
+    """R11 resting hand {active, claim_held, moves, owner_kills} with
+    checked types, or None."""
     if not isinstance(value, dict):
         return None
     out = {}
-    for key in ("enabled", "active"):
+    for key in ("active", "claim_held"):
         out[key] = value.get(key) if isinstance(value.get(key), bool) else None
     for key in ("moves", "owner_kills"):
         v = value.get(key)
         out[key] = v if isinstance(v, int) and not isinstance(v, bool) else None
     return out
+
+
+def _watchers_or_empty(value):
+    """R11: watcher holder names from /v1/info, oldest first."""
+    if not isinstance(value, list):
+        return []
+    return [str(w["holder"]) for w in value if isinstance(w, dict) and w.get("holder")]
+
+
+def _agent_mode(claim_model, watchers):
+    """R11 (#5): what the connected agent(s) are doing. A claim holder is
+    in hands control; anyone watching without the claim is a watcher."""
+    if claim_model:
+        return "control"
+    return "watcher" if watchers else "none"
 
 
 def build_dashboard_model(info, claim, queue, reserved_for, receipts, now):
@@ -363,15 +379,15 @@ def build_dashboard_model(info, claim, queue, reserved_for, receipts, now):
                     if not isinstance(probe_ok, bool)
                     else ("ok" if probe_ok else "degraded")
                 ),
-                # R9: display sleep (#13), owner-only idle and the
-                # jiggler (#28), normalized like the fields above.
+                # R9: display sleep (#13), owner-only idle; R11 resting
+                # hand (replaces the jiggler), normalized like the above.
                 "owner_idle_seconds": _finite_or_none(pc_state.get("owner_idle_seconds")),
                 "display_asleep": (
                     pc_state.get("display_asleep")
                     if isinstance(pc_state.get("display_asleep"), bool)
                     else None
                 ),
-                "jiggler": _jiggler_or_none(pc_state.get("jiggler")),
+                "resting_hand": _resting_or_none(pc_state.get("resting_hand")),
                 "human_motion": (
                     pc_state.get("human_motion")
                     if isinstance(pc_state.get("human_motion"), bool)
@@ -394,9 +410,18 @@ def build_dashboard_model(info, claim, queue, reserved_for, receipts, now):
                 else None
             ),
         }
+    watchers = [
+        name
+        for name in _watchers_or_empty(info_dict.get("watchers"))
+        if not claim_model or name != claim_model["holder"]
+    ]
+    wt = _finite_or_none(info_dict.get("watcher_timeout_seconds"))
     return {
         "services": services,
         "claim": claim_model,
+        "mode": _agent_mode(claim_model, watchers),
+        "watchers": watchers,
+        "watcher_timeout_s": wt,
         "queue_len": len(queue) if isinstance(queue, list) else 0,
         "reserved_for": str(reserved_for) if reserved_for else None,
         "pc": pc,
@@ -424,6 +449,15 @@ def format_diagnostics(model, stamp):
         lines.append(text)
     else:
         lines.append("Claim: none")
+    mode = model.get("mode")
+    if mode is not None:
+        text = {"control": "Mode: hands control", "watcher": "Mode: watcher",
+                "none": "Mode: no agent"}.get(mode, "Mode: unknown")
+        if model.get("watchers"):
+            text += " · watching: " + ", ".join(model["watchers"])
+        if model.get("watcher_timeout_s") is not None:
+            text += f" · watcher timeout {_fmt_duration(model['watcher_timeout_s'])}"
+        lines.append(text)
     extra = []
     if model.get("queue_len"):
         extra.append(f"queue: {model['queue_len']} waiting")
@@ -450,12 +484,9 @@ def format_diagnostics(model, stamp):
         extra_pc = []
         if pc.get("display_asleep") is not None:
             extra_pc.append("display asleep" if pc["display_asleep"] else "display on")
-        jig = pc.get("jiggler")
-        if isinstance(jig, dict) and jig.get("enabled") is not None:
-            extra_pc.append(
-                "jiggler "
-                + ("off" if not jig["enabled"] else ("drifting" if jig.get("active") else "armed"))
-            )
+        rest = pc.get("resting_hand")
+        if isinstance(rest, dict) and rest.get("active") is not None:
+            extra_pc.append("resting hand " + ("active" if rest["active"] else "inactive"))
         if extra_pc:
             lines.append("Desktop: " + " · ".join(extra_pc))
     counts = model.get("counts", {})
@@ -642,13 +673,13 @@ class RelayApp:
             "elevations": pending,
             "autostart": _autostart_enabled(),
             "token_ready": bool(self.token),
-            "jiggler": self._jiggler_view(model),
+            "resting_hand": self._resting_view(model),
         }
 
-    def _jiggler_view(self, model):
+    def _resting_view(self, model):
         pc = (model or {}).get("pc") or {}
-        jig = pc.get("jiggler")
-        return jig if isinstance(jig, dict) else None
+        rest = pc.get("resting_hand")
+        return rest if isinstance(rest, dict) else None
 
     def diagnostics_text(self):
         if self._last_model is None:
@@ -672,27 +703,6 @@ class RelayApp:
                 "(autostart is only available on Windows)."
             )
         return ok
-
-    def set_jiggler(self, enabled):
-        """Flip the hands jiggler flag through the hands' own /jiggler
-        route (same secret-gated path an operator script would use).
-        Returns (ok, message)."""
-        if not self._started or not self._hands_secret:
-            return False, "start the services first"
-        try:
-            r = requests.post(
-                f"{HANDS_URL}/jiggler",
-                json={"enabled": bool(enabled)},
-                headers={"X-Secret": self._hands_secret},
-                timeout=3,
-            )
-            body = r.json()
-        except Exception as exc:
-            return False, f"hands did not answer ({exc.__class__.__name__})"
-        if r.status_code != 200 or not body.get("ok"):
-            return False, str(body.get("error") or f"HTTP {r.status_code}")
-        self.log_line(f"Idle jiggler {'enabled' if enabled else 'disabled'}.")
-        return True, "ok"
 
     # ---------- helpers ----------
     def _stamp(self):
@@ -939,8 +949,8 @@ class RelayApp:
             # secret itself. Its gate() reads this global per request.
             module.SHARED_SECRET = self._hands_secret
             self._hands_module = module
-            # R9 (#28): the jiggler thread idles unless its flag is on.
-            starter = getattr(module, "start_jiggler", None)
+            # R11: the resting-hand thread idles unless a claim is held.
+            starter = getattr(module, "start_resting_hand", None)
             if callable(starter):
                 starter()
             self.log_line(
@@ -1042,9 +1052,9 @@ class RelayApp:
                     except Exception:
                         pass
                 if name == "hands":
-                    # R9: the reload makes a fresh module (and jiggler);
-                    # the old module's jiggler thread must not live on.
-                    stopper = getattr(self._hands_module, "stop_jiggler", None)
+                    # R9: the reload makes a fresh module (and resting
+                    # hand); the old module's thread must not live on.
+                    stopper = getattr(self._hands_module, "stop_resting_hand", None)
                     if callable(stopper):
                         stopper()
                 self._start_one(name)
@@ -1163,7 +1173,7 @@ class RelayApp:
             return  # window-close and Stop can both land here
         self._stopping = True
         hands = getattr(self, "_hands_module", None)
-        stopper = getattr(hands, "stop_jiggler", None)
+        stopper = getattr(hands, "stop_resting_hand", None)
         if callable(stopper):
             try:
                 stopper()
@@ -1297,14 +1307,6 @@ def build_ui_server(relay, ui_key, port_ref=None):
         ok = relay.set_autostart(value)
         return flask.jsonify({"ok": bool(ok), "autostart": _autostart_enabled()})
 
-    @ui.post("/api/jiggler")
-    def _jiggler():
-        value = _flag_body()
-        if value is None:
-            return flask.jsonify({"ok": False, "error": "enabled must be true or false"}), 400
-        ok, msg = relay.set_jiggler(value)
-        return flask.jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
-
     @ui.post("/api/elevation/<eid>")
     def _elevation(eid):
         body = flask.request.get_json(force=True, silent=True) or {}
@@ -1348,8 +1350,9 @@ def main():
     window = webview.create_window(
         "Muse Relay v2",
         url,
-        width=1240,
-        height=860,
+        # R11: the default IS the minimum size (owner: "a really good size").
+        width=980,
+        height=700,
         min_size=(980, 700),
         background_color="#0b0d12",
     )

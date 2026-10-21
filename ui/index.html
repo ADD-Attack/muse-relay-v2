@@ -85,6 +85,10 @@
         <span id="claim-queue" class="chip chip-quiet">queue 0</span>
       </div>
       <div class="reserved" id="claim-reserved" hidden></div>
+      <div class="mode-row">
+        <span class="chip chip-quiet" id="agent-mode" title="Watcher: eyes only (screen polling, no actuation). Hands control: claim held.">no agent</span>
+        <span class="mode-meta" id="watcher-setting">watcher timeout —</span>
+      </div>
     </div>
   </section>
 
@@ -100,15 +104,8 @@
       <div><dt>Display</dt><dd id="pc-display">—</dd></div>
       <div><dt>Yield probe</dt><dd id="pc-probe">—</dd></div>
       <div><dt>Motion</dt><dd id="pc-motion">—</dd></div>
+      <div title="While the agent holds hands control and is idle, the pointer rests like a hand on the mouse. Your input overrides it instantly."><dt>Resting hand</dt><dd id="pc-resting">—</dd></div>
     </dl>
-    <div class="jiggler">
-      <label class="switch" title="Small human-like pointer drift while you are away (stops the instant you touch the mouse)">
-        <input type="checkbox" id="jiggler">
-        <span class="track"><span class="thumb"></span></span>
-        <span class="switch-label">Idle jiggler</span>
-      </label>
-      <span class="chip chip-quiet" id="jiggler-state">off</span>
-    </div>
   </section>
 
   <!-- token -->

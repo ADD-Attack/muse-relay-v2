@@ -89,6 +89,101 @@ _reserved_for = None  # queue head holder with an exclusive claim window
 _reserved_until = 0.0
 
 
+# R11: the hands' resting-hand float runs only while a claim is held, and
+# only the gateway knows claims — so every grant/refresh/release is pushed
+# to the hands (/resting/claim) with the remaining lease and a sequence
+# number (pushes run on a thread; the hands drops out-of-order ones). This
+# is a notification only: lease duration and renewal are unchanged.
+_claim_push_seq = 0
+_claim_push_session = requests.Session()
+
+
+def _post_claim_to_hands(payload):
+    try:
+        _claim_push_session.post(
+            f"{HANDS_URL}/resting/claim", json=payload, headers=_hands_headers(), timeout=3
+        )
+    except requests.RequestException:
+        pass  # the hands is down or older: no resting hand, nothing else changes
+
+
+def _push_claim_locked(claim, now):
+    """Queue a claim-state push to the hands; call with _claim_lock held."""
+    global _claim_push_seq
+    _claim_push_seq += 1
+    payload = {
+        "held": claim is not None,
+        "expires_in": max(0.0, float(claim["expires_at"]) - now) if claim else 0.0,
+        "seq": _claim_push_seq,
+    }
+    threading.Thread(target=_post_claim_to_hands, args=(payload,), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# R11 watchers (owner, 2026-10-20). A watcher is an agent in eyes-only mode:
+# it polls the screen and never takes the claim, so without this it was
+# invisible. POST /v1/watch (or ?watcher=<name> on /v1/screen,
+# /v1/screen/hash, /v1/screen/wait) marks it watching; it lapses after its
+# timeout without a refresh. Timeout: 30 s default, agent-settable up to
+# 60 s per watcher (timeout_seconds) or gateway-wide (/v1/watch/config).
+# Independent of the claim lease.
+# ---------------------------------------------------------------------------
+WATCHER_TIMEOUT_DEFAULT = 30
+WATCHER_TIMEOUT_MIN = 30
+WATCHER_TIMEOUT_MAX = 60
+
+_watch_lock = threading.Lock()
+_watchers = {}  # holder -> {"holder", "since", "last_seen", "timeout_seconds"}
+
+
+def _initial_watcher_timeout():
+    return _clamp_number(
+        os.environ.get("WATCHER_TIMEOUT_SECONDS", WATCHER_TIMEOUT_DEFAULT),
+        WATCHER_TIMEOUT_DEFAULT,
+        WATCHER_TIMEOUT_MIN,
+        WATCHER_TIMEOUT_MAX,
+    )
+
+
+_watcher_timeout = None  # set lazily from _initial_watcher_timeout()
+
+
+def _watcher_timeout_setting():
+    global _watcher_timeout
+    with _watch_lock:
+        if _watcher_timeout is None:
+            _watcher_timeout = _initial_watcher_timeout()
+        return _watcher_timeout
+
+
+def _touch_watcher(holder, timeout_seconds=None, now=None):
+    holder = str(holder or "").strip()[:80]
+    if not holder:
+        return None
+    now = time.time() if now is None else now
+    default = _watcher_timeout_setting()
+    with _watch_lock:
+        entry = _watchers.get(holder)
+        if entry is None or now >= entry["last_seen"] + entry["timeout_seconds"]:
+            entry = {"holder": holder, "since": now, "timeout_seconds": default}
+            _watchers[holder] = entry
+        if timeout_seconds is not None:
+            entry["timeout_seconds"] = _clamp_number(
+                timeout_seconds, default, WATCHER_TIMEOUT_MIN, WATCHER_TIMEOUT_MAX
+            )
+        entry["last_seen"] = now
+        return dict(entry)
+
+
+def _current_watchers(now=None):
+    """Live watchers (lazy expiry), oldest first."""
+    now = time.time() if now is None else now
+    with _watch_lock:
+        for holder in [h for h, e in _watchers.items() if now >= e["last_seen"] + e["timeout_seconds"]]:
+            del _watchers[holder]
+        return sorted((dict(e) for e in _watchers.values()), key=lambda e: e["since"])
+
+
 def _active_reservation_locked(now):
     """Reserved holder if the grace window is still open, else None."""
     global _reserved_for, _reserved_until
@@ -170,6 +265,10 @@ def _reset_coordination_state():
     with _receipts_lock:
         _receipts.clear()
         _pending_payloads.clear()
+    global _watcher_timeout
+    with _watch_lock:
+        _watchers.clear()
+        _watcher_timeout = None
 
 
 app = Flask(__name__)
@@ -314,8 +413,53 @@ def info():
             "parser_reachable": parser_ok,
             "hands_claim": _current_claim(),
             "pc_state": pc_state,
+            "watchers": _current_watchers(),
+            "watcher_timeout_seconds": _watcher_timeout_setting(),
         }
     )
+
+
+@app.get("/v1/watch")
+def watch_status():
+    return jsonify(
+        {"ok": True, "watchers": _current_watchers(), "timeout_seconds": _watcher_timeout_setting()}
+    )
+
+
+@app.post("/v1/watch")
+def watch_touch():
+    """{holder, timeout_seconds?}: start or refresh watcher (eyes-only) mode."""
+    body = request.get_json(force=True, silent=True) or {}
+    entry = _touch_watcher(body.get("holder"), body.get("timeout_seconds"))
+    if entry is None:
+        return jsonify({"ok": False, "error": "holder is required"}), 400
+    return jsonify({"ok": True, "watcher": entry})
+
+
+@app.post("/v1/watch/release")
+def watch_release():
+    body = request.get_json(force=True, silent=True) or {}
+    holder = str(body.get("holder") or "").strip()
+    if not holder:
+        return jsonify({"ok": False, "error": "holder is required"}), 400
+    with _watch_lock:
+        removed = _watchers.pop(holder, None) is not None
+    return jsonify({"ok": True, "released": removed})
+
+
+@app.post("/v1/watch/config")
+def watch_config():
+    """{timeout_seconds}: gateway-wide watcher timeout (30-60 s)."""
+    global _watcher_timeout
+    body = request.get_json(force=True, silent=True) or {}
+    value = body.get("timeout_seconds")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return jsonify({"ok": False, "error": "timeout_seconds must be a number"}), 400
+    value = _clamp_number(value, WATCHER_TIMEOUT_DEFAULT, WATCHER_TIMEOUT_MIN, WATCHER_TIMEOUT_MAX)
+    _watcher_timeout_setting()
+    with _watch_lock:
+        _watcher_timeout = value
+    return jsonify({"ok": True, "timeout_seconds": value})
 
 
 @app.get("/v1/hands/claim")
@@ -346,6 +490,7 @@ def hands_claim():
             # Same holder re-claiming refreshes the lease.
             current["purpose"] = purpose or current["purpose"]
             current["expires_at"] = now + ttl
+            _push_claim_locked(current, now)
             return jsonify({"ok": True, "granted": True, "claim": dict(current)})
         if current is not None:
             if want_queue:
@@ -413,6 +558,7 @@ def hands_claim():
             "since": now,
             "expires_at": now + ttl,
         }
+        _push_claim_locked(_claim, now)
         return jsonify({"ok": True, "granted": True, "claim": dict(_claim)})
 
 
@@ -468,6 +614,7 @@ def hands_release():
                 403,
             )
         _claim = None
+        _push_claim_locked(None, now)
         _reserve_head_locked(now)
         return jsonify(
             {
@@ -747,6 +894,8 @@ def screen():
     the gateway can decode images; a matching If-None-Match gets a 304
     so pollers can skip re-downloading unchanged frames.
     """
+    if request.args.get("watcher"):
+        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
     kwargs, err = _screen_fetch_kwargs()
     if err is not None:
         return err
@@ -778,6 +927,8 @@ def screen_hash():
     agree, so a blinking caret cannot flip the result. ?monitor=N /
     ?region=x,y,w,h select the capture variant being hashed.
     """
+    if request.args.get("watcher"):
+        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
     stable = (request.args.get("stable") or "").lower() in ("1", "true", "yes")
     try:
         mask_bottom = int(request.args.get("mask_bottom", DEFAULT_MASK_BOTTOM))
@@ -832,6 +983,8 @@ def screen_wait():
     Single-sample (not the two-frame stable composite) so a 25s hold is not
     a chain of 0.65s gaps.
     """
+    if request.args.get("watcher"):
+        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
     since = request.args.get("since", request.args.get("hash", ""))
     if not isinstance(since, str):
         since = ""

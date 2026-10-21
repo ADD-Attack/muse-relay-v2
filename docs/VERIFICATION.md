@@ -375,3 +375,21 @@ hands/motion.py). Needs the WebView2 runtime (present on Win10/11).
    boundary; after unlock no further characters appear.
 6. Repeat 3 with an elevated window (e.g. admin PowerShell) focused and
    note `owner_guard`.
+
+## R11 — resting hand, watcher mode, GUI layout (live receipts owed)
+
+1. Window opens at 980x700 (= the minimum). Gateway token card fully
+   visible; Recent acts / Log below it, never over it. No toggle in the
+   Desktop card; "Resting hand" reads Inactive while no claim is held.
+2. Claim the hands from the agent, act once, then idle: the pointer
+   starts floating at once, barely at first, and by ~1.5 s it's a gentle
+   1-3 px float within ~4 px of where it rests. "Resting hand: Active".
+   Another act resets it; it continues indefinitely while idle under the claim.
+3. Touch the mouse (or a key) while it floats: it stops at once,
+   owner_kills +1, and stays still until the agent's next act.
+4. Release the claim: float stops, readout Inactive. Lease duration and
+   renewal unchanged (default 900 s).
+5. From the agent: POST /v1/watch {holder} (or ?watcher=<name> on
+   /v1/screen/hash) gives mode chip "Watcher"; lapses 30 s after the last
+   poll. timeout_seconds: 60 (per watcher) or POST /v1/watch/config
+   {timeout_seconds: 60}; the GUI shows the setting read-only.

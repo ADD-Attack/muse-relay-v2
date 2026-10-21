@@ -1,9 +1,9 @@
-"""Human-like pointer system + idle jiggler planning (wishlist #24, #28,
+"""Human-like pointer system + resting-hand planning (wishlist #24, #28,
 #29, #30) — pure, Windows-free, deterministic for a seeded rng.
 
 Everything here PLANS; nothing injects input. muse_relay_hands.py owns
 the pyautogui calls, the input mutex instance, the self-input ledger
-instance and the jiggler thread, and feeds them through these planners.
+instance and the resting-hand thread, and feeds them through these planners.
 Every random parameter is drawn per call from the rng passed in, so no
 two movements share a curve (#24/#28 "never a fixed pattern").
 
@@ -20,9 +20,8 @@ Rule -> code map (also in docs/R9-MOTION-DESIGN.md):
   #30 structural miss ~15 %, 5-10 px + fast correct .. plan_move (miss branch)
   #30 input mutex + 150-300 ms hand travel ........... InputMutex
   #30 Fitts extension: target size sets speed ........ fitts_duration(width)
-  #30 idle drift after 30-60 s, 1-3 px / lazy drift .. plan_jiggle, jiggle_start_after
-  #28 intensity decays with idle length .............. plan_jiggle
-  #28 jiggler motion is not owner activity ........... SelfInputLedger
+  R11 resting hand: 0->full over 1.5 s, local float . plan_rest, rest_intensity
+  #28 resting-hand motion is not owner activity ...... SelfInputLedger
   #24 latency budget: <= +0.5 s per click ............ click_budget, fit_click_timing
 """
 import math
@@ -293,34 +292,45 @@ def plan_scroll(clicks, rng):
     return out
 
 
-# ------------------------------------------------------------- jiggler
+# ------------------------------------------------------- resting hand
+# R11 (owner, 2026-10-20): the idle jiggler is gone. While the agent holds
+# hands control and is idle between acts, the pointer behaves like a hand
+# resting on the mouse: a tiny local float around where it rests. The float
+# starts the instant an act ends at ~zero intensity and ramps linearly to
+# full at REST_RAMP_S; any act resets the ramp. There is no timeout.
 
-JIGGLE_DECAY_S = 240.0  # e-folding time of jiggle size with idle length
+REST_RAMP_S = 1.5     # seconds from act end to full float intensity
+REST_RADIUS_PX = 4.0  # the float never strays further than this from rest
+REST_STEP_PX = (1.0, 3.0)  # per-move jitter at full intensity (1-3 px class)
 
 
-def jiggle_start_after(rng):
-    """Owner-idle seconds before drift begins, drawn per episode (#30)."""
-    return rng.uniform(30.0, 60.0)
+def rest_intensity(since_act_s):
+    """0 at act end, linear to 1.0 at REST_RAMP_S, then held at 1.0."""
+    t = float(since_act_s)
+    if not math.isfinite(t) or t <= 0.0:
+        return 0.0
+    return min(1.0, t / REST_RAMP_S)
 
 
-def plan_jiggle(idle_into_episode, rng):
-    """One jiggle: (dx, dy, wait_before_next_seconds) (#28, #30).
+def plan_rest(offset, intensity, rng):
+    """One resting-hand float step: (new_offset, wait_before_next_seconds).
 
-    Intensity decays with idle length: early in an episode, lazy drifts
-    up to ~40 px every few seconds; after a long idle, 1-3 px
-    micro-jitters minutes apart. Size and wait are both drawn per
-    jiggle — the decay is a trend, never a fixed cadence.
+    offset is the current (ox, oy) from the rest position. The step is a
+    1-3 px organic nudge scaled by intensity, biased back toward rest as
+    the offset grows, and the result is clamped to REST_RADIUS_PX — so it
+    hovers locally, never drifts away.
     """
-    e = max(0.0, float(idle_into_episode))
-    decay = math.exp(-e / JIGGLE_DECAY_S)
-    if rng.random() < 0.35 * decay:
-        amp = rng.uniform(10.0, 40.0) * decay + rng.uniform(1.0, 3.0)
-    else:
-        amp = rng.uniform(1.0, 3.0)
+    k = max(0.0, min(1.0, float(intensity)))
+    ox, oy = float(offset[0]), float(offset[1])
+    amp = rng.uniform(*REST_STEP_PX) * k
     ang = rng.uniform(0, 2 * math.pi)
-    dx, dy = math.cos(ang) * amp, math.sin(ang) * amp
-    wait = rng.uniform(3.0, 10.0) * (1.0 + e / 90.0)
-    return dx, dy, min(300.0, wait)
+    pull = min(1.0, math.hypot(ox, oy) / REST_RADIUS_PX) * 0.6
+    nx = ox * (1.0 - pull) + math.cos(ang) * amp
+    ny = oy * (1.0 - pull) + math.sin(ang) * amp
+    r = math.hypot(nx, ny)
+    if r > REST_RADIUS_PX:
+        nx, ny = nx * REST_RADIUS_PX / r, ny * REST_RADIUS_PX / r
+    return (nx, ny), rng.uniform(0.25, 0.9)
 
 
 # ------------------------------------------------ self-input ledger
@@ -332,11 +342,11 @@ def tick_diff(a, b):
 
 
 class SelfInputLedger:
-    """Separate jiggler-injected input from owner input (#28 constraint 2).
+    """Separate resting-hand-injected input from owner input (#28 constraint 2).
 
     Windows' last-input time (GetLastInputInfo) counts injected input
-    too, so jiggler motion would otherwise look like the owner. The
-    jiggler records the tick span of every injection; when the OS's
+    too, so resting-hand motion would otherwise look like the owner. The
+    resting hand records the tick span of every injection; when the OS's
     last-input tick falls inside a recorded span, the input was ours
     and owner idle keeps counting from the owner's last real input.
 
@@ -386,6 +396,28 @@ class SelfInputLedger:
                 return idle_seconds  # nothing known about the owner: be honest
             return max(idle_seconds, tick_diff(now_tick, self._owner_tick) / 1000.0)
 
+    @staticmethod
+    def last_input_tick(idle_seconds, now_tick):
+        """The OS last-input tick implied by an idle reading, or None."""
+        if idle_seconds is None or now_tick is None:
+            return None
+        return (int(now_tick) - int(round(idle_seconds * 1000))) & 0xFFFFFFFF
+
+    def owner_input_since(self, baseline_tick, idle_seconds, now_tick):
+        """True if the owner gave input after baseline_tick (R11).
+
+        Input newer than the baseline that is not inside one of our own
+        recorded spans is the owner's. The baseline is taken when a rest
+        episode starts, so the agent's act that preceded it never counts.
+        """
+        last = self.last_input_tick(idle_seconds, now_tick)
+        if last is None or baseline_tick is None:
+            return False
+        if tick_diff(last, baseline_tick) <= self.SLACK_MS:
+            return False
+        with self._lock:
+            return not self._is_self(last)
+
 
 # --------------------------------------------------------- input mutex
 
@@ -395,7 +427,7 @@ class InputMutex:
     acquire(kind) blocks until no other op is injecting; when the
     previous op used the other device ("mouse" vs "keys") and ended
     less than its drawn travel time ago, it sleeps the remainder first.
-    try_acquire is the jiggler's non-blocking form: it never waits for
+    try_acquire is the resting hand's non-blocking form: it never waits for
     an op and never makes an op wait for it.
     """
 

@@ -219,17 +219,18 @@ def test_model_carries_r9_desktop_fields(appmod):
         "hands_reachable": True, "parser_reachable": True,
         "pc_state": {"locked": False, "idle_seconds": 1.0, "probe_ok": True, "probe_failures": 0,
                      "owner_idle_seconds": 90.0, "display_asleep": False, "human_motion": True,
-                     "jiggler": {"enabled": True, "active": True, "moves": 4, "owner_kills": 1}},
+                     "resting_hand": {"active": True, "claim_held": True, "intensity": 1.0,
+                                      "moves": 4, "owner_kills": 1}},
     }
     m = appmod.build_dashboard_model(info, None, [], None, {}, 0)
     assert m["pc"]["owner_idle_seconds"] == 90.0
-    assert m["pc"]["jiggler"] == {"enabled": True, "active": True, "moves": 4, "owner_kills": 1}
+    assert m["pc"]["resting_hand"] == {"active": True, "claim_held": True, "moves": 4, "owner_kills": 1}
     text = appmod.format_diagnostics(m, "x")
-    assert "Desktop: display on · jiggler drifting" in text
-    junk = dict(info, pc_state=dict(info["pc_state"], jiggler="on", display_asleep="no",
+    assert "Desktop: display on · resting hand active" in text
+    junk = dict(info, pc_state=dict(info["pc_state"], resting_hand="on", display_asleep="no",
                                     owner_idle_seconds=float("nan")))
     m = appmod.build_dashboard_model(junk, None, [], None, {}, 0)
-    assert m["pc"]["jiggler"] is None and m["pc"]["display_asleep"] is None
+    assert m["pc"]["resting_hand"] is None and m["pc"]["display_asleep"] is None
     assert m["pc"]["owner_idle_seconds"] is None
 
 
@@ -243,32 +244,12 @@ def test_autostart_toggle(appmod, client, relay, monkeypatch):
     assert client.post("/api/autostart", json={"enabled": "yes"}, headers=H).status_code == 400
 
 
-# ------------------------------------------------------------- jiggler
+# -------------------------------------------------------- resting hand
 
-def test_jiggler_needs_started_services(client):
-    r = client.post("/api/jiggler", json={"enabled": True}, headers=H)
-    assert r.status_code == 409
-
-
-def test_jiggler_goes_through_hands_route_with_secret(appmod, client, relay, monkeypatch):
-    relay._started = True
-    relay._hands_secret = "s" * 40
-    seen = {}
-
-    class R:
-        status_code = 200
-
-        def json(self):
-            return {"ok": True}
-
-    def post(url, json=None, headers=None, timeout=None):
-        seen.update(url=url, json=json, headers=headers)
-        return R()
-
-    monkeypatch.setattr(appmod.requests, "post", post)
-    assert client.post("/api/jiggler", json={"enabled": True}, headers=H).get_json()["ok"]
-    assert seen["url"].endswith("/jiggler") and seen["json"] == {"enabled": True}
-    assert seen["headers"] == {"X-Secret": "s" * 40}
+def test_jiggler_toggle_route_is_gone(client, appmod):
+    # R11: the resting hand is a state, not a toggle — no UI route flips it.
+    assert client.post("/api/jiggler", json={"enabled": True}, headers=H).status_code in (404, 405)
+    assert not hasattr(appmod.RelayApp, "set_jiggler")
 
 
 # ------------------------------------------------------------ elevation
