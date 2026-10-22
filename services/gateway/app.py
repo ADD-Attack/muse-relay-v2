@@ -1135,7 +1135,7 @@ def _held_failure_diagnostics(result):
         return {"ok": False}
     safe = {"ok": False}
     enums = {
-        "error_code": {"type_aborted", "foreground_changed", "locked", "yield"},
+        "error_code": {"type_aborted", "input_aborted", "foreground_changed", "locked", "yield"},
         "abort_reason": {"owner", "locked", "foreground_changed"},
         "owner_guard": {"hook", "dwtime", "none", None},
         "method_used": {"keys", "paste"},

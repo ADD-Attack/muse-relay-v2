@@ -183,3 +183,13 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_typing.py tests/test_r72_fixround.py tests/test_v3r4.py::test_type_aborts_midway_when_owner_activates tests/test_v3r4.py::test_type_completes_when_owner_stays_away tests/test_v3r2_remaining.py::test_paste_restores_clipboard_when_hotkey_raises tests/test_r13_first_effect.py`: 50 passed.
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p12 or p11'`: 4 passed, 17 deselected.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 346 passed, 1 skipped.
+
+
+## B11 — ordinary input and resting-motion guards
+
+Pointer steps, scroll chunks, key presses, hotkey chords, break chords, drag segments, and focus activation sample owner, lock, and focus before each unit. The first blocked unit still yields or returns the existing focus refusal. After any side effect the result is `input_aborted`, which is not a yield, and the held-diagnostic allow-list retains that code. A direct click or hotkey that fails after the native call releases the button or every chord key. Drag still releases a button that went down. Resting sub-steps also stop on lock or degraded coverage before the next move. No native absolute-pointer injection was added, so this package does not depend on B15.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_motion.py`: 7 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 353 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p11 or p12 or p07'`: 7 passed, 14 deselected.

@@ -888,17 +888,62 @@ def _plan_path(x0, y0, x1, y1, rng, width=None, path_seconds=None):
     return motion.plan_move(x0, y0, x1, y1, rng, width=width, path_seconds=path_seconds)
 
 
-def _run_path(steps):
+def _peek_unit(guard):
+    """Owner, lock, then focus. None means the next unit may be emitted."""
+    guard.sample()
+    if guard.owner_seen:
+        return "owner", None
+    if _probe_locked() is True:
+        return "locked", None
+    if has_request_context():
+        focus = _focus_guard()
+        if focus is not None:
+            return "foreground_changed", focus
+    return None, None
+
+
+def _refuse_unit(kind, focus, started):
+    """A blocked first unit can yield. Anything later is a partial abort."""
+    if not started:
+        if focus is not None:
+            return focus
+        return _pre_effect_response("locked" if kind == "locked" else "owner")
+    return (jsonify({
+        "ok": False,
+        "aborted": True,
+        "error": "input aborted after a side effect",
+        "error_code": "input_aborted",
+        "abort_reason": kind,
+    }), 409)
+
+
+def _guarded_inject(guard, started, function, *args, **kwargs):
+    kind, focus = _peek_unit(guard)
+    if kind:
+        raise _InputRefused(_refuse_unit(kind, focus, started[0]))
+    result = _inject(function, *args, **kwargs)
+    guard.after_write()
+    started[0] = True
+    return result
+
+
+def _run_path(steps, guard=None, started=None):
+    guard = guard or _TypeOwnerGuard()
+    if started is None:
+        started = [False]
     for sx, sy, delay in steps:
-        _inject(pyautogui.moveTo, sx, sy, duration=0)
+        _guarded_inject(guard, started, pyautogui.moveTo, sx, sy, duration=0)
         time.sleep(delay)
+    return guard, started
 
 
-def _move_human(x, y, rng=None, width=None, path_seconds=None):
+def _move_human(x, y, rng=None, width=None, path_seconds=None, guard=None, started=None):
     """Move the cursor to (x, y) along a planned human-like path."""
     rng = rng if rng is not None else random
     x0, y0 = pyautogui.position()
-    _run_path(_plan_path(x0, y0, x, y, rng, width=width, path_seconds=path_seconds))
+    return _run_path(
+        _plan_path(x0, y0, x, y, rng, width=width, path_seconds=path_seconds),
+        guard=guard, started=started)
 
 
 def _box(d):
@@ -924,7 +969,7 @@ def move():
                 time.sleep(motion.attention_delay(random, d.get("text_chars")))
             _move_human(x, y, width=min(w, h) if w else None)
         else:
-            _inject(pyautogui.moveTo, x, y, duration=0.2)
+            _guarded_inject(_TypeOwnerGuard(), [False], pyautogui.moveTo, x, y, duration=0.2)
     return {"ok": True}
 
 
@@ -942,8 +987,23 @@ def click():
     button = d.get("button", "left")
     if not _human(d):
         with _input("mouse"):
-            _inject(pyautogui.moveTo, x, y, duration=0.2)
-            _inject(pyautogui.click, x=x, y=y, button=button)
+            guard, started = _TypeOwnerGuard(), [False]
+            _guarded_inject(guard, started, pyautogui.moveTo, x, y, duration=0.2)
+            begun = {"v": False}
+
+            def _click(begun=begun):
+                begun["v"] = True
+                return pyautogui.click(x=x, y=y, button=button)
+
+            try:
+                _guarded_inject(guard, started, _click)
+            except Exception:
+                if begun["v"]:
+                    try:
+                        pyautogui.mouseUp(button=button)
+                    except Exception:
+                        pass
+                raise
         return {"ok": True}
     rng = random
     w, h = _box(d)
@@ -964,11 +1024,16 @@ def click():
         )
         if attention:
             time.sleep(attention)
-        _move_human(tx, ty, rng, path_seconds=travel)
+        guard, started = _TypeOwnerGuard(), [False]
+        _move_human(tx, ty, rng, path_seconds=travel, guard=guard, started=started)
         time.sleep(hover)
+        kind, focus = _peek_unit(guard)
+        if kind:
+            raise _InputRefused(_refuse_unit(kind, focus, started[0]))
         _before_effect()
         try:
             _inject(pyautogui.mouseDown, x=tx, y=ty, button=button)
+            guard.after_write()
             time.sleep(hold)
         finally:
             pyautogui.mouseUp(x=tx, y=ty, button=button)
@@ -1262,7 +1327,19 @@ def type_text():
 def key():
     d = request.get_json(force=True)
     with _input("keys"):
-        _inject(pyautogui.press, d["key"])
+        name = d["key"]
+        begun = {"v": False}
+
+        def _press(begun=begun, name=name):
+            begun["v"] = True
+            return pyautogui.press(name)
+
+        try:
+            _guarded_inject(_TypeOwnerGuard(), [False], _press)
+        except Exception:
+            if begun["v"]:
+                _release_chord((name,))
+            raise
     return {"ok": True}
 
 
@@ -1273,13 +1350,14 @@ def scroll():
     d = request.get_json(force=True)
     clicks = int(d.get("clicks", 3))
     with _input("mouse"):
+        guard, started = _TypeOwnerGuard(), [False]
         if _human(d):
             for chunk, pause in motion.plan_scroll(clicks, random):
-                _inject(pyautogui.scroll, chunk)
+                _guarded_inject(guard, started, pyautogui.scroll, chunk)
                 if pause:
                     time.sleep(pause)
         else:
-            _inject(pyautogui.scroll, clicks)
+            _guarded_inject(guard, started, pyautogui.scroll, clicks)
     return {"ok": True}
 
 
@@ -1987,7 +2065,9 @@ class _RestingHand:
                 current = _owner_input_snapshot()
                 owner_changed = (initial_owner is not None and isinstance(current, tuple)
                                  and current[0] != initial_owner)
-                if owner_changed or abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1:
+                if (owner_changed or _probe_locked() is True
+                        or owner_coverage() == "degraded"
+                        or abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1):
                     fought = True
                     break
                 _inject(pyautogui.moveTo, sx, sy, duration=0)
@@ -2305,7 +2385,19 @@ def hotkey():
     ):
         return jsonify({"ok": False, "error": "keys must be a non-empty list of strings"}), 400
     with _input("keys"):
-        _inject(pyautogui.hotkey, *keys)
+        begun = {"v": False}
+
+        def _chord(begun=begun):
+            begun["v"] = True
+            return pyautogui.hotkey(*keys)
+
+        try:
+            _guarded_inject(_TypeOwnerGuard(), [False], _chord)
+        except Exception:
+            if begun["v"]:
+                _release_chord(keys)
+            raise
+        _release_chord(keys)
     return {"ok": True}
 
 
@@ -2329,8 +2421,21 @@ def break_():
     if isinstance(times, bool) or not isinstance(times, int) or not 1 <= times <= 3:
         return jsonify({"ok": False, "error": "times must be an integer 1..3"}), 400
     with _input("keys"):
+        guard, started = _TypeOwnerGuard(), [False]
         for i in range(times):
-            _inject(pyautogui.hotkey, "ctrl", "c")
+            begun = {"v": False}
+
+            def _chord(begun=begun):
+                begun["v"] = True
+                return pyautogui.hotkey("ctrl", "c")
+
+            try:
+                _guarded_inject(guard, started, _chord)
+            except Exception:
+                if begun["v"]:
+                    _release_chord(("ctrl", "c"))
+                raise
+            _release_chord(("ctrl", "c"))
             if i < times - 1:
                 time.sleep(0.15)
     return {"ok": True, "times": times}
@@ -2358,25 +2463,32 @@ def drag():
         return jsonify({"ok": False, "error": "duration must be a number"}), 400
     human = _human(d)
     with _input("mouse"):
+        guard, started = _TypeOwnerGuard(), [False]
         if human:
             # R9 (#24): human approach to the grab point, a hover, then a
             # human path while held; duration (if given) is the held
             # travel time, else Fitts decides. Endpoints are exact.
-            _move_human(x1, y1)
+            _move_human(x1, y1, guard=guard, started=started)
             time.sleep(motion.hover_delay(random))
         else:
-            _inject(pyautogui.moveTo, x1, y1)
+            _guarded_inject(guard, started, pyautogui.moveTo, x1, y1)
         down = False
         try:
+            kind, focus = _peek_unit(guard)
+            if kind:
+                raise _InputRefused(_refuse_unit(kind, focus, started[0]))
             # Mark first so a mouseDown/move failure still releases the button.
             # duration 0 is real; do not coerce it with `or 0.4`.
             down = True
             _inject(pyautogui.mouseDown, button=button)
+            guard.after_write()
             if human:
                 time.sleep(motion.click_hold(random))
-                _move_human(x2, y2, path_seconds=duration)
+                _move_human(x2, y2, path_seconds=duration, guard=guard, started=started)
             else:
-                _inject(pyautogui.moveTo, x2, y2, duration=0.4 if duration is None else duration)
+                _guarded_inject(
+                    guard, started, pyautogui.moveTo, x2, y2,
+                    duration=0.4 if duration is None else duration)
         finally:
             if down:
                 pyautogui.mouseUp(button=button)
@@ -2598,7 +2710,7 @@ def focus():
                 if current is None:
                     return jsonify({"ok": False, "error_code": "target_unavailable",
                                     "error": "focus target disappeared"}), 409
-                if not _inject(_activate_window, current):
+                if not _guarded_inject(_TypeOwnerGuard(), [False], _activate_window, current):
                     return (
                         jsonify(
                             {
