@@ -91,3 +91,11 @@ Commands:
 `tests/test_r72_fixround.py::test_lock_check_is_lock_only_not_self_triggering_idle` is unchanged. At lines 269–271 its fake reports `(None, None)` on the first probe and `(False, 0.0)` on every subsequent probe, even before any key has been injected. Lines 287–288 require complete successful typing and exactly ONE idle probe (`calls["n"] == 1`). F2 requires a new owner/lock check under input access after acquisition, before any side effect. That second check therefore sees newly reported activity and correctly refuses; bypassing it would regress P07.
 
 This is distinct from self-triggered idle *after* injection, which must continue to be ignored/attributed correctly. Proposed narrow resolution for operator review: keep the successful full-text assertion, change the fixture to report zero idle only once `s.written` is nonempty (actual simulated self input), and replace the single-probe assertion with evidence of the required pre-input revalidation. This preserves the original anti-self-trigger purpose without prohibiting F2. No changes to this test, its expectations, or other legacy expected outputs have been made. B07 onward is not started pending this gate, per the one-conflict-at-a-time operator direction.
+
+### B06 supersession authorized and gate cleared
+
+Muse authorized the minimal F2 harness correction. Only `tests/test_r72_fixround.py` lines 271 and 288 changed: simulated zero idle now begins after `s.written` contains an injected key, instead of on the second probe regardless of input; the exact-one-probe assertion becomes at least two (door and post-acquisition revalidation). The full-text successful-typing assertion and remainder of the file are unchanged. Authority: F2's required guard revalidation under input access and explicit operator authorization. This preserves the anti-self-trigger regression purpose.
+
+Reruns:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 316 passed, 1 skipped.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_input.py tests/test_relay_fix_acceptance.py -k 'lock_change or p07'`: 13 passed, 18 deselected.

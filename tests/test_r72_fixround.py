@@ -268,7 +268,7 @@ def test_lock_check_is_lock_only_not_self_triggering_idle(hands, monkeypatch):
 
     def lock_state():
         calls["n"] += 1
-        return (None, None) if calls["n"] == 1 else (False, 0.0)
+        return (False, 0.0) if s.written else (None, None)
 
     monkeypatch.setattr(hands, "_probe_locked", lambda: False)
 
@@ -285,7 +285,7 @@ def test_lock_check_is_lock_only_not_self_triggering_idle(hands, monkeypatch):
 
     resp = run_with_idle()
     assert _status(resp) == 200 and "".join(s.written) == URL40
-    assert calls["n"] == 1  # only the door consulted the idle probe
+    assert calls["n"] >= 2  # F2: door plus post-acquisition revalidation
 
 
 def test_monitor_inert_off_windows(hands, monkeypatch):
