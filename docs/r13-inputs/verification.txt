@@ -1,0 +1,41 @@
+Verification performed in the resumed task on 2026-10-22
+
+Source:
+  git rev-parse HEAD
+  ee3cf0e2dbc4bd2b2cac3ee1651471aa41a6dbd1
+  git status --short
+  Empty output before and after work in the pinned review checkout.
+
+Source map:
+  Python AST and JavaScript symbol lookup verified 74 existing source locations.
+  Proposed new helpers/protocols and missing watcher symbols remain distinguished.
+
+Acceptance baseline:
+  env RELAY_REPO_ROOT=/home/john/Work/relay-review-20261022 \
+    /tmp/relay-review-20261022-venv/bin/python -m pytest -q \
+    /home/john/Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py --tb=short
+  Result: 18 failed, 3 passed in 1.27s; exit 1 expected on unfixed R12.
+  Full output: baseline_acceptance_results.txt
+
+Reference patch:
+  Made a separate copy of pinned source, excluding .git and test caches.
+  git apply --check ../F4_REFERENCE_UNVERIFIED.patch
+  git apply ../F4_REFERENCE_UNVERIFIED.patch
+  Both succeeded in the disposable reference-checkout.
+  /tmp/relay-review-20261022-venv/bin/python -m pytest -q .
+  Result: 233 passed, 1 skipped in 9.61s.
+  Same acceptance command with RELAY_REPO_ROOT pointing at reference-checkout
+  and -k p04: 1 passed, 20 deselected in 0.46s.
+
+Document:
+  Built with bundled Python/python-docx from Codex primary runtime 26.909.12148.
+  Rendered with the packaged render_docx.py and bundled headless LibreOffice.
+  14 pages rendered; all 14 page PNGs visually inspected and accepted.
+  QA render files are intentionally excluded from the deliverable bundle.
+
+Evidence limits:
+  All action/network/owner/capture checks use simulated boundaries.
+  No live Windows relay or watcher was accessed or changed.
+  Earlier R10/R12/script-suite results are attributed to the original review.
+  Two sequential drafting/challenge passes were performed, but a High/Max
+  runtime effort selector was not independently attested.

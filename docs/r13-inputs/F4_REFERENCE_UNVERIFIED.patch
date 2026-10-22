@@ -1,0 +1,113 @@
+diff --git i/services/gateway/app.py w/services/gateway/app.py
+index 8a10481..8a24ae8 100644
+--- i/services/gateway/app.py
++++ w/services/gateway/app.py
+@@ -1120,6 +1120,34 @@ def _public_receipt(receipt):
+     return {k: v for k, v in receipt.items() if not k.startswith("_")}
+ 
+ 
++def _held_failure_diagnostics(result):
++    """F4 reference: retain bounded structured evidence without payload echoes.
++
++    Deliberately omit arbitrary error/debug strings. This is diagnostic
++    retention only; terminal-state classification remains unchanged.
++    """
++    if not isinstance(result, dict):
++        return {"ok": False}
++    safe = {"ok": False}
++    enums = {
++        "error_code": {"type_aborted", "foreground_changed", "locked", "yield"},
++        "abort_reason": {"owner", "locked"},
++        "owner_guard": {"hook", "dwtime", "none", None},
++        "method_used": {"keys", "paste"},
++    }
++    for key, allowed in enums.items():
++        value = result.get(key)
++        if key in result and isinstance(value, (str, type(None))) and value in allowed:
++            safe[key] = value
++    for key in ("chars", "chars_typed"):
++        value = result.get(key)
++        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000:
++            safe[key] = value
++    if isinstance(result.get("aborted"), bool):
++        safe["aborted"] = result["aborted"]
++    return safe
++
++
+ def _pump_receipt(receipt, now):
+     """One retry step for a held receipt. Returns the receipt.
+ 
+@@ -1163,7 +1191,7 @@ def _pump_receipt(receipt, now):
+             return receipt
+         if failed or status is None:
+             receipt["state"] = "failed"
+-            receipt["result"] = None
++            receipt["result"] = _held_failure_diagnostics(result)
+             _pending_payloads.pop(receipt["id"], None)
+             return receipt
+         receipt["state"] = "applied"
+diff --git i/tests/test_f4_diagnostics_reference.py w/tests/test_f4_diagnostics_reference.py
+new file mode 100644
+index 0000000..d7cc9a6
+--- /dev/null
++++ w/tests/test_f4_diagnostics_reference.py
+@@ -0,0 +1,59 @@
++"""UNVERIFIED reference patch: F4 diagnostic retention, simulated only."""
++import importlib.util
++from pathlib import Path
++
++import pytest
++
++
++@pytest.fixture
++def gateway():
++    path = Path(__file__).resolve().parents[1] / "services/gateway/app.py"
++    spec = importlib.util.spec_from_file_location("f4_reference_gateway", path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def test_retains_known_partial_type_fields(gateway):
++    source = {"ok": False, "error_code": "type_aborted", "aborted": True,
++              "abort_reason": "owner", "owner_guard": "hook", "method_used": "keys",
++              "chars": 40, "chars_typed": 12}
++    assert gateway._held_failure_diagnostics(source) == source
++
++
++def test_omits_payloads_and_arbitrary_messages(gateway):
++    secret = "DO-NOT-PERSIST"
++    source = {"error": secret, "text": secret, "error_code": secret,
++              "debug": {"payload": secret}, "owner_guard": {"payload": secret}}
++    safe = gateway._held_failure_diagnostics(source)
++    assert safe == {"ok": False}
++
++
++def test_rejects_wrong_field_types_and_bounds(gateway):
++    safe = gateway._held_failure_diagnostics({"chars": True, "chars_typed": -1,
++                                            "aborted": "true", "owner_guard": ["hook"]})
++    assert safe == {"ok": False}
++    assert gateway._held_failure_diagnostics(None) == {"ok": False}
++    assert "chars" not in gateway._held_failure_diagnostics({"chars": 1_000_001})
++
++
++def test_partial_failure_is_terminal_and_not_retained_by_reference(gateway, monkeypatch):
++    gateway._reset_coordination_state()
++    receipt = {"id": "reference", "op": "type", "state": "held", "deadline": 100}
++    gateway._store_receipt(receipt, {"text": "private payload"})
++    result = {"ok": False, "error_code": "type_aborted", "abort_reason": "owner",
++              "chars_typed": 12, "chars": 40}
++    calls = []
++
++    def forward(*args):
++        calls.append(args)
++        return 409, result
++
++    monkeypatch.setattr(gateway, "_forward_act", forward)
++    gateway._pump_receipt(receipt, 1)
++    result["chars_typed"] = 30
++    gateway._pump_receipt(receipt, 2)
++    assert receipt["state"] == "failed"
++    assert receipt["result"]["chars_typed"] == 12
++    assert "reference" not in gateway._pending_payloads
++    assert len(calls) == 1

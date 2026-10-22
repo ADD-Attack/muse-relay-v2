@@ -1,0 +1,128 @@
+FFFFFFFFFFFFFFF.F.F.F                                                    [100%]
+=================================== FAILURES ===================================
+___________________ test_p01_expired_hold_does_not_dispatch ____________________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:115: in test_p01_expired_hold_does_not_dispatch
+    assert not calls, "A receipt at or beyond its start deadline was forwarded"
+E   AssertionError: A receipt at or beyond its start deadline was forwarded
+E   assert not [('click', {'x': 1, 'y': 2})]
+_____________ test_p02_response_loss_is_unknown_and_never_retried ______________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:132: in test_p02_response_loss_is_unknown_and_never_retried
+    assert receipt["state"] == "unknown-outcome"
+E   AssertionError: assert 'failed' == 'unknown-outcome'
+E     
+E     - unknown-outcome
+E     + failed
+___________ test_p03_empty_success_body_cannot_become_applied[empty] ___________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:152: in test_p03_empty_success_body_cannot_become_applied
+    assert response.status_code == 502
+E   assert 200 == 502
+E    +  where 200 = <WrapperTestResponse 65 bytes [200 OK]>.status_code
+___________ test_p03_empty_success_body_cannot_become_applied[list] ____________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:152: in test_p03_empty_success_body_cannot_become_applied
+    assert response.status_code == 502
+E   assert 200 == 502
+E    +  where 200 = <WrapperTestResponse 66 bytes [200 OK]>.status_code
+___________ test_p03_empty_success_body_cannot_become_applied[null] ____________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:152: in test_p03_empty_success_body_cannot_become_applied
+    assert response.status_code == 502
+E   assert 200 == 502
+E    +  where 200 = <WrapperTestResponse 68 bytes [200 OK]>.status_code
+__________ test_p03_empty_success_body_cannot_become_applied[string] ___________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:152: in test_p03_empty_success_body_cannot_become_applied
+    assert response.status_code == 502
+E   assert 200 == 502
+E    +  where 200 = <WrapperTestResponse 66 bytes [200 OK]>.status_code
+________ test_p03_empty_success_body_cannot_become_applied[missing_ok] _________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:152: in test_p03_empty_success_body_cannot_become_applied
+    assert response.status_code == 502
+E   assert 200 == 502
+E    +  where 200 = <WrapperTestResponse 42 bytes [200 OK]>.status_code
+______________ test_p04_held_abort_retains_safe_partial_evidence _______________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:168: in test_p04_held_abort_retains_safe_partial_evidence
+    assert isinstance(receipt.get("result"), dict), "Held failure discarded structured diagnostics"
+E   AssertionError: Held failure discarded structured diagnostics
+E   assert False
+E    +  where False = isinstance(None, dict)
+E    +    where None = <built-in method get of dict object at 0x7f0eb251f9c0>('result')
+E    +      where <built-in method get of dict object at 0x7f0eb251f9c0> = {'id': 'acceptance-held', 'op': 'type', 'state': 'failed', 'deadline': 10010.0, ...}.get
+________________ test_p05_http_200_with_ok_false_is_not_applied ________________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:184: in test_p05_http_200_with_ok_false_is_not_applied
+    assert receipt["state"] == "failed"
+E   AssertionError: assert 'applied' == 'failed'
+E     
+E     - failed
+E     + applied
+______________ test_p06_locked_hold_cannot_wait_without_a_target _______________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:195: in test_p06_locked_hold_cannot_wait_without_a_target
+    assert receipt["state"] == "failed"
+E   AssertionError: assert 'held' == 'failed'
+E     
+E     - failed
+E     + held
+_________ test_p07_guards_are_rechecked_after_input_acquisition[owner] _________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:222: in test_p07_guards_are_rechecked_after_input_acquisition
+    assert response.status_code == 409
+E   assert 200 == 409
+E    +  where 200 = <WrapperTestResponse streamed [200 OK]>.status_code
+______ test_p07_guards_are_rechecked_after_input_acquisition[foreground] _______
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:222: in test_p07_guards_are_rechecked_after_input_acquisition
+    assert response.status_code == 409
+E   assert 200 == 409
+E    +  where 200 = <WrapperTestResponse streamed [200 OK]>.status_code
+_________ test_p07_guards_are_rechecked_after_input_acquisition[both] __________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:222: in test_p07_guards_are_rechecked_after_input_acquisition
+    assert response.status_code == 409
+E   assert 200 == 409
+E    +  where 200 = <WrapperTestResponse streamed [200 OK]>.status_code
+_________ test_p08_failed_fetch_preserves_last_success_but_marks_error _________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:245: in test_p08_failed_fetch_preserves_last_success_but_marks_error
+    assert first.get("last_success_at") is not None
+E   AssertionError: assert None is not None
+E    +  where None = <built-in method get of dict object at 0x7f0eb240c940>('last_success_at')
+E    +    where <built-in method get of dict object at 0x7f0eb240c940> = {'holder': 'acceptance', 'since': 10000.0, 'timeout_seconds': 30, 'last_seen': 10000.0}.get
+___________ test_p09_gateway_restart_release_reaches_surviving_hands ___________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:302: in test_p09_gateway_restart_release_reaches_surviving_hands
+    assert not hands._resting.claim_held(hands._resting._clock())
+E   AssertionError: assert not True
+E    +  where True = claim_held(10000.0)
+E    +    where claim_held = <acceptance_15._RestingHand object at 0x7f0eb2472350>.claim_held
+E    +      where <acceptance_15._RestingHand object at 0x7f0eb2472350> = <module 'acceptance_15' from '/home/john/Work/relay-review-20261022/hands/muse_relay_hands.py'>._resting
+E    +    and   10000.0 = monotonic()
+E    +      where monotonic = <acceptance_15._RestingHand object at 0x7f0eb2472350>._clock
+E    +        where <acceptance_15._RestingHand object at 0x7f0eb2472350> = <module 'acceptance_15' from '/home/john/Work/relay-review-20261022/hands/muse_relay_hands.py'>._resting
+___________ test_p11_owner_keyboard_stops_remaining_rest_glide[True] ___________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:338: in test_p11_owner_keyboard_stops_remaining_rest_glide
+    assert landed is None
+E   assert (503, 500) is None
+__________ test_p12_nonjitter_keys_cannot_ignore_owner_takeover[True] __________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:367: in test_p12_nonjitter_keys_cannot_ignore_owner_takeover
+    assert response.status_code == 409
+E   assert 200 == 409
+E    +  where 200 = <WrapperTestResponse 125 bytes [200 OK]>.status_code
+________________ test_p13_secondary_capture_uses_virtual_origin ________________
+Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py:394: in test_p13_secondary_capture_uses_virtual_origin
+    assert hands._grab(rects[0]).getpixel((50, 50)) == (0, 128, 0)
+E   assert (0, 0, 0) == (0, 128, 0)
+E     
+E     At index 1 diff: 0 != 128
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p01_expired_hold_does_not_dispatch
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p02_response_loss_is_unknown_and_never_retried
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p03_empty_success_body_cannot_become_applied[empty]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p03_empty_success_body_cannot_become_applied[list]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p03_empty_success_body_cannot_become_applied[null]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p03_empty_success_body_cannot_become_applied[string]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p03_empty_success_body_cannot_become_applied[missing_ok]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p04_held_abort_retains_safe_partial_evidence
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p05_http_200_with_ok_false_is_not_applied
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p06_locked_hold_cannot_wait_without_a_target
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p07_guards_are_rechecked_after_input_acquisition[owner]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p07_guards_are_rechecked_after_input_acquisition[foreground]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p07_guards_are_rechecked_after_input_acquisition[both]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p08_failed_fetch_preserves_last_success_but_marks_error
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p09_gateway_restart_release_reaches_surviving_hands
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p11_owner_keyboard_stops_remaining_rest_glide[True]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p12_nonjitter_keys_cannot_ignore_owner_takeover[True]
+FAILED Work/relay-framework-resumed-20261022/test_relay_fix_acceptance.py::test_p13_secondary_capture_uses_virtual_origin
+18 failed, 3 passed in 1.27s
