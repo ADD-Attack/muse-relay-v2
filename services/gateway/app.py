@@ -35,6 +35,8 @@ from io import BytesIO
 import requests
 from flask import Flask, Response, jsonify, request
 
+RELEASE = "v3 R12"  # this build's release identity, reported on /v1/info
+
 TOKEN = os.environ.get("RELAY_GATEWAY_TOKEN", "")
 HANDS_URL = os.environ.get("HANDS_URL", "http://host.docker.internal:5000").rstrip("/")
 HANDS_SECRET = os.environ.get("HANDS_SECRET", "")
@@ -406,6 +408,7 @@ def info():
     return jsonify(
         {
             "ok": True,
+            "release": RELEASE,
             "hands_url": HANDS_URL,
             "hands_secret_configured": bool(HANDS_SECRET),
             "hands_reachable": hands_ok,

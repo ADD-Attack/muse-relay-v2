@@ -21,6 +21,7 @@ Rule -> code map (also in docs/R9-MOTION-DESIGN.md):
   #30 input mutex + 150-300 ms hand travel ........... InputMutex
   #30 Fitts extension: target size sets speed ........ fitts_duration(width)
   R11 resting hand: 0->full over 1.5 s, local float . plan_rest, rest_intensity
+  R12 float travel: interpolated eased glide ..... plan_rest_path, rest_glide_seconds
   #28 resting-hand motion is not owner activity ...... SelfInputLedger
   #24 latency budget: <= +0.5 s per click ............ click_budget, fit_click_timing
 """
@@ -331,6 +332,104 @@ def plan_rest(offset, intensity, rng):
     if r > REST_RADIUS_PX:
         nx, ny = nx * REST_RADIUS_PX / r, ny * REST_RADIUS_PX / r
     return (nx, ny), rng.uniform(0.25, 0.9)
+
+
+# ------------------------------------------------- resting float travel
+# R12 (wishlist #36): plan_rest picks WHERE the float goes; this decides
+# HOW the pointer gets there. In R11 each step was executed as a single
+# instant move-to-point, so on the real desktop the pointer teleported
+# 1-3 px at a time (snap, hold still, snap). The glide below routes the
+# travel through the same planner the active moves use (_segment: cubic
+# Bezier, minimum-jerk progress, value-noise tremor) and densifies the
+# sampled curve to pixel resolution.
+#
+# Continuity threshold: consecutive emitted positions differ by at most
+# 1 px per axis (Chebyshev distance <= 1). One pixel is the display's
+# own quantum — no smaller move can be emitted — so at float scale
+# "continuous" means exactly this: every pixel between here and there is
+# visited, in order, spread over the eased glide duration, instead of
+# the whole 1-3 px landing in a single frame.
+
+REST_GLIDE_BASE_S = 0.08     # glide time before the per-pixel term
+REST_GLIDE_PER_PX_S = 0.045  # plus this per pixel of travel
+REST_GLIDE_MAX_S = 0.30      # a float step never takes longer than this
+
+
+def _rhu(v):
+    """Round half up (densifier arithmetic; Python's round() is banker's,
+    whose half-way cases could open a 2 px gap between neighbours)."""
+    return math.floor(v + 0.5)
+
+
+def rest_glide_seconds(dist, rng):
+    """Travel time for one resting-float glide (R12).
+
+    Short and slow on purpose: a resting hand drifts, it does not dart.
+    Drawn per glide so no two share a duration.
+    """
+    base = REST_GLIDE_BASE_S + REST_GLIDE_PER_PX_S * max(0.0, float(dist))
+    return min(REST_GLIDE_MAX_S, base * rng.uniform(0.9, 1.1))
+
+
+def plan_rest_path(x0, y0, x1, y1, rng):
+    """Interpolated micro-path for one resting-hand float step (R12, #36).
+
+    Returns [(x, y, delay_after)] with integer positions along the
+    _segment curve from (x0, y0) to (x1, y1), densified so consecutive
+    emitted positions differ by at most 1 px per axis — for spans of
+    ANY length: each anchor span is interpolated from its own starting
+    point (fixed origin, fraction k/cheb of the whole span), so the
+    ideal sub-steps move at most 1 px per axis, and _rhu (monotone)
+    preserves that bound through rounding. The delays sum to
+    rest_glide_seconds(dist); the final step is exactly (x1, y1).
+    A zero-length step returns [].
+    """
+    dist = math.hypot(x1 - x0, y1 - y0)
+    if dist == 0:
+        return []
+    duration = rest_glide_seconds(dist, rng)
+    raw = _segment((float(x0), float(y0)), (float(x1), float(y1)), duration, rng)
+    out = []
+    pending = 0.0  # delay accumulated while the curve is still sub-pixel
+    # Start frame in the same _rhu lattice as the anchors: int()
+    # truncation toward zero disagrees with _rhu by up to 1 px on
+    # negative float starts, which could stack into a 2 px first step.
+    ex, ey = _rhu(float(x0)), _rhu(float(y0))  # last emitted position
+    for fx, fy, dt in raw:
+        gx, gy = _rhu(fx), _rhu(fy)  # this sample's integer anchor
+        cheb = max(abs(gx - ex), abs(gy - ey))
+        if cheb == 0:
+            if out:
+                ox, oy, od = out[-1]
+                out[-1] = (ox, oy, od + dt)
+            else:
+                pending += dt
+            continue
+        total = dt + pending
+        pending = 0.0
+        share = total / cheb
+        # Interpolate from the SPAN START (bx, by), never from the
+        # running emitted point: re-basing each sub-step on the moving
+        # point re-multiplies the remaining distance by the whole-span
+        # fraction every sub-step, steps grow super-linearly, and once
+        # remaining x fraction reaches 1.5, _rhu emits a 2 px jump
+        # (spans >= 4 Chebyshev at longer glides; review F1).
+        bx, by = ex, ey
+        for k in range(1, cheb + 1):
+            ix = _rhu(bx + (gx - bx) * k / cheb)
+            iy = _rhu(by + (gy - by) * k / cheb)
+            if (ix, iy) == (ex, ey):
+                pending += share
+                continue
+            out.append((ix, iy, share + pending))
+            pending = 0.0
+            ex, ey = ix, iy
+    if not out:
+        return [(_rhu(float(x1)), _rhu(float(y1)), duration)]
+    drift = duration - sum(s[2] for s in out)
+    lx, ly, ld = out[-1]
+    out[-1] = (_rhu(float(x1)), _rhu(float(y1)), max(0.0, ld + drift))
+    return out
 
 
 # ------------------------------------------------ self-input ledger

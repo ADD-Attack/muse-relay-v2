@@ -1474,6 +1474,10 @@ def _display_state(idle_seconds):
 # the episode baseline outside our own ledger spans, or the pointer not
 # where we left it) and the hand stays still until the next agent act.
 # Never moves while locked, while the probe is blind, or during an act.
+# R12 (#36): each float step is executed as an interpolated glide
+# (motion.plan_rest_path) instead of one instant moveTo — the pointer
+# travels the 1-3 px along an eased micro-path; the contract above is
+# unchanged, including the mid-glide owner-grab abort in _move.
 
 class _RestingHand:
     POLL = 0.1
@@ -1605,14 +1609,46 @@ class _RestingHand:
         return self.POLL
 
     def _move(self, target):
-        """Inject one float step; None if the owner moved the pointer."""
+        """Glide one float step (R12 #36); None if the owner took over.
+
+        R11 executed the step as a single moveTo(duration=0) and the
+        pointer teleported 1-3 px. Now the travel follows
+        motion.plan_rest_path: interpolated sub-steps (<= 1 px apart)
+        along the human-like planner's curve, spread over the glide
+        duration. Before every sub-step the pointer must still be where
+        the glide left it; if it is not, the owner's hand is on the
+        mouse and the glide aborts at once — step() ends the episode
+        exactly as it did for a fought instant move.
+        """
         t0 = _tick_ms()
         # Record BEFORE injecting: a concurrent yield probe must already
-        # see this span as ours.
-        _LEDGER.record(t0, (t0 + 250) & 0xFFFFFFFF)
-        pyautogui.moveTo(target[0], target[1], duration=0)
+        # see this span as ours. The provisional end covers the longest
+        # glide (REST_GLIDE_MAX_S); truncate_last closes the span at its
+        # true end, and the finally below guarantees that close even if
+        # a sub-step raises — otherwise a fault mid-glide would leave
+        # the full 1500 ms provisional standing, a window in which real
+        # owner input could be misread as self-input (review F3).
+        _LEDGER.record(t0, (t0 + 1500) & 0xFFFFFFFF)
+        fought = False
+        expect = None
+        try:
+            start = tuple(pyautogui.position())
+            steps = motion.plan_rest_path(start[0], start[1], target[0], target[1], self.rng)
+            expect = start
+            for sx, sy, delay in steps:
+                px, py = pyautogui.position()
+                if abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1:
+                    fought = True
+                    break
+                pyautogui.moveTo(sx, sy, duration=0)
+                expect = (sx, sy)
+                if delay > 0:
+                    time.sleep(delay)
+        finally:
+            _LEDGER.truncate_last((_tick_ms() + 50) & 0xFFFFFFFF)
+        if fought:
+            return None
         px, py = pyautogui.position()
-        _LEDGER.truncate_last((_tick_ms() + 50) & 0xFFFFFFFF)
         if abs(px - target[0]) > 1 or abs(py - target[1]) > 1:
             return None
         return (px, py)
