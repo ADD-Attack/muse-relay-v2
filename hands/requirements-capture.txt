@@ -1,0 +1,8 @@
+# F7 capture backend, named for the hands build.
+# ImageGrab (Pillow) is the all-screens surface. pyautogui is the legacy
+# full-frame call and the fallback when ImageGrab cannot open a display.
+# pillow==13.0.0 is the version exercised by the Linux simulation.
+# Packaged Windows pins, the executable hash, and the DPI mode are F7-C
+# evidence. This file does not claim that gate.
+pillow==13.0.0
+pyautogui

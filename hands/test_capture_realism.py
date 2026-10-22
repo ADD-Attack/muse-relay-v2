@@ -204,12 +204,41 @@ def run():
     )
 
     # ---- _grab seam -------------------------------------------------------
+    # Virtual origin of RECTS is x=-1280, so global (10, 20) is surface
+    # pixel (1290, 20). The legacy full frame stays a plain screenshot.
     calls["screenshot"].clear()
-    orig_grab(None)
-    orig_grab({"x": 10, "y": 20, "w": 300, "h": 200})
+    from PIL import ImageGrab
+
+    recorded = []
+    surface = Image.new("RGB", (3200, 1080), (0, 0, 0))
+    surface.putpixel((1290, 20), (7, 8, 9))
+
+    def _record_screenshot(region=None, allScreens=False, **kwargs):
+        recorded.append(("pyautogui", region, bool(allScreens)))
+        return surface.copy()
+
+    def _record_grab(bbox=None, all_screens=False, **kwargs):
+        recorded.append(("imagegrab", bbox, bool(all_screens)))
+        if not all_screens:
+            raise OSError("primary surface is not the virtual desktop")
+        return surface.copy()
+
+    saved_screenshot = hands.pyautogui.screenshot
+    saved_grab = ImageGrab.grab
+    hands.pyautogui.screenshot = _record_screenshot
+    ImageGrab.grab = _record_grab
+    try:
+        orig_grab(None)
+        cropped = orig_grab({"x": 10, "y": 20, "w": 300, "h": 200})
+    finally:
+        hands.pyautogui.screenshot = saved_screenshot
+        ImageGrab.grab = saved_grab
     check(
-        "_grab forwards region tuple only when a rect is given",
-        calls["screenshot"] == [None, (10, 20, 300, 200)],
+        "_grab forwards a rect against the virtual surface, not as a global region",
+        recorded == [("pyautogui", None, False), ("imagegrab", None, True)]
+        and calls["screenshot"] == []
+        and cropped.size == (300, 200)
+        and cropped.getpixel((0, 0)) == (7, 8, 9),
     )
 
     # ---- _plan_key_delays -------------------------------------------------

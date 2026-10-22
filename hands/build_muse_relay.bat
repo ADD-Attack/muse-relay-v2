@@ -10,7 +10,7 @@ REM ============================================================
 cd /d %~dp0
 
 echo Installing build tools and app dependencies...
-python -m pip install --upgrade pyinstaller flask pyautogui pillow waitress
+python -m pip install --upgrade pyinstaller flask waitress -r requirements-capture.txt
 if errorlevel 1 goto :fail
 
 echo Building Muse Relay.exe ...

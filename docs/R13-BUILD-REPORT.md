@@ -277,3 +277,56 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_reconcile.py`: 5 passed.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 367 passed, 1 skipped.
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p09`: 1 passed, 20 deselected (with the B13 setup).
+
+
+## B15 — virtual-surface capture
+
+`_grab(None)` is still `pyautogui.screenshot()` with no region. That is the legacy default extent. A rectangle is cropped from one all-screens bitmap. Pillow `ImageGrab.grab(all_screens=True)` is the selected backend. `pyautogui.screenshot(allScreens=True)` is only the fallback when ImageGrab cannot run, and it is not given a region tuple. With virtual origin `(vx, vy)`, global `(x, y, w, h)` is the surface crop `(x-vx, y-vy, w, h)`.
+
+A rect that does not lie on that bitmap is HTTP 400. The response is JSON, not a padded black PNG. A bitmap whose size is not the topology union is HTTP 409. There is no rescale. The DPI mode a packaged hands process must use is Per-Monitor-V2, so these pixels match input coordinates. This module does not call `SetProcessDpiAwareness`. A second topology read after the grab must match the first. The screenshot route retries that refusal once, then returns 409. Monitor index is not treated as a permanent display identity: the response also carries the global rect.
+
+The route still calls `_grab` with one positional argument. The realism stubs that replace `_grab` keep working. Variant responses add `X-Screen-Origin`, `X-Screen-Surface`, and `X-Screen-Rect`. The legacy frame does not.
+
+P13's assertions were not edited. `git diff -- tests/test_relay_fix_acceptance.py` is empty. P13 passes: green at `x=-100`, blue at `x=100`.
+
+The only check changed in `hands/test_capture_realism.py`:
+
+- File: `hands/test_capture_realism.py`
+- Old check name: `_grab forwards region tuple only when a rect is given`
+- New check name: `_grab forwards a rect against the virtual surface, not as a global region`
+- Old expectation: `calls["screenshot"] == [None, (10, 20, 300, 200)]`
+- New expectation: the legacy call is `("pyautogui", None, False)`. The rect requests ImageGrab with `all_screens=True` and no bbox. The crop is 300 by 200 and its `(0, 0)` pixel is surface pixel `(1290, 20)`, which is global `(10, 20)` at virtual origin `x=-1280`. The global tuple is not forwarded (`calls["screenshot"] == []`).
+
+Authority named by the ruling: P13 and the framework section the ruling asked to cite. P13 is the F7 row in the regression map. The crop implemented is the one in "F7 Secondary monitor capture uses the wrong surface": `(x-vx, y-vy, x-vx+w, y-vy+h)`. The ruling text says "P13 + the F6 framework section". F6 is claim synchronization. No F6 code and no F6 assertion were changed. No other check in `hands/test_capture_realism.py` was edited.
+
+```diff
+     calls["screenshot"].clear()
+-    orig_grab(None)
+-    orig_grab({"x": 10, "y": 20, "w": 300, "h": 200})
++    from PIL import ImageGrab
++    recorded = []
++    surface = Image.new("RGB", (3200, 1080), (0, 0, 0))
++    surface.putpixel((1290, 20), (7, 8, 9))
++    # recorders installed only for this check; restored in finally
+     check(
+-        "_grab forwards region tuple only when a rect is given",
+-        calls["screenshot"] == [None, (10, 20, 300, 200)],
++        "_grab forwards a rect against the virtual surface, not as a global region",
++        recorded == [("pyautogui", None, False), ("imagegrab", None, True)]
++        and calls["screenshot"] == []
++        and cropped.size == (300, 200)
++        and cropped.getpixel((0, 0)) == (7, 8, 9),
+     )
+```
+
+The full hunk is `git diff 95ddb94 -- hands/test_capture_realism.py`. The lines above are the expectation change. The recorders exist so this check can see the virtual-surface call without editing `_screenshot` or any other check.
+
+`hands/requirements-capture.txt` names the backend: `pillow==13.0.0` (the Linux simulation) and `pyautogui`. `build_app.bat` installs that file, hidden-imports `PIL.ImageGrab`, and also bundles `hands/claim_sync.py`. The hands module loads that sibling by path; without it a packaged exe cannot start. `hands/build_muse_relay.bat` installs from the same requirements file.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_capture.py tests/test_relay_fix_acceptance.py::test_p13_secondary_capture_uses_virtual_origin`: 9 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python hands/test_capture_realism.py`: the virtual-surface check passes. One untouched check still fails: `jitter=false: single legacy write, no per-char sleeps`. B10 types per character for both jitter values. That check was not edited.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 375 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 20 passed, 1 failed. The failure is P08, `last_success_at` is absent. Gateway watcher code was not modified. That field is B17. P13 passed in this run.
+
+Unresolved: F7-C packaged Windows evidence is not part of this package. No executable was built here, and no DPI measurement was taken.

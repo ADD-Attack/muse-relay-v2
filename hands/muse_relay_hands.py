@@ -632,17 +632,170 @@ def _monitor_rects():
     return [{"x": 0, "y": 0, "w": int(w), "h": int(h), "primary": True}]
 
 
-def _grab(rect):
-    """Capture rect ({"x","y","w","h"}) or, with None, the full frame.
+class _CaptureOutOfRange(Exception):
+    """A monitor index is not in this topology snapshot."""
 
-    pyautogui on Windows captures the virtual desktop, so a region with
-    a negative origin works through the same call.
+
+class _CaptureOutOfSurface(Exception):
+    """The requested rect is outside the virtual surface. Never pad it."""
+
+
+class _CaptureTopologyChanged(Exception):
+    """Enumeration changed while the bitmap was being taken."""
+
+
+class _CaptureExtentMismatch(Exception):
+    """The bitmap size does not equal the topology union. No rescale."""
+
+
+class _CaptureBackendUnavailable(Exception):
+    """Neither ImageGrab nor pyautogui could return an all-screens bitmap."""
+
+
+def _topology_snapshot():
+    """One normalized monitor list. Order is not a display identity."""
+    snapshot = []
+    for rect in _monitor_rects():
+        snapshot.append(
+            {
+                "x": int(rect["x"]),
+                "y": int(rect["y"]),
+                "w": int(rect["w"]),
+                "h": int(rect["h"]),
+                "primary": bool(rect.get("primary")),
+            }
+        )
+    return snapshot
+
+
+def _union(topology):
+    """Global origin and extent of the virtual surface for this snapshot."""
+    x0 = min(rect["x"] for rect in topology)
+    y0 = min(rect["y"] for rect in topology)
+    x1 = max(rect["x"] + rect["w"] for rect in topology)
+    y1 = max(rect["y"] + rect["h"] for rect in topology)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _grab_all_screens():
+    """All-screens bitmap. Cropping is never left to the backend.
+
+    ImageGrab(all_screens=True) is the selected Windows surface. pyautogui's
+    allScreens flag is only the fallback when ImageGrab cannot run, and a
+    region tuple is never forwarded: global coordinates are not surface
+    coordinates when the virtual origin is not (0, 0).
+    """
+    try:
+        from PIL import ImageGrab
+
+        image = ImageGrab.grab(all_screens=True)
+        if image is not None:
+            return image
+    except Exception:
+        image = None
+    try:
+        return pyautogui.screenshot(allScreens=True)
+    except Exception as exc:
+        raise _CaptureBackendUnavailable("virtual surface capture failed") from exc
+
+
+def capture_virtual_surface(topology=None):
+    """Pixels plus the global origin and extent of those pixels.
+
+    Coordinate space is the virtual desktop. Pixel (0, 0) is global
+    (vx, vy), the minimum monitor origin in this same topology snapshot.
+    A requested global rect (x, y, w, h) is the surface crop
+    (x-vx, y-vy, w, h). DPI mode for a packaged hands process is
+    Per-Monitor-V2 so these pixels match input coordinates. This module
+    does not change process DPI awareness and does not rescale: a bitmap
+    whose size differs from the topology union is refused.
+    """
+    snapshot = list(topology) if topology is not None else _topology_snapshot()
+    image = _grab_all_screens()
+    _vx, _vy, width, height = _union(snapshot)
+    return {
+        "image": image,
+        "x": _vx,
+        "y": _vy,
+        "w": image.size[0],
+        "h": image.size[1],
+        "topology": snapshot,
+        "expected_w": width,
+        "expected_h": height,
+    }
+
+
+def _grab(rect):
+    """Capture rect ({"x","y","w","h"}) or, with None, the legacy frame.
+
+    None keeps pyautogui.screenshot() with no region, the historical
+    default extent. A rect is cropped from the virtual surface of one
+    topology snapshot. The snapshot is read again after the grab; a
+    change refuses the bitmap instead of pairing it with another layout.
     """
     if rect is None:
         return pyautogui.screenshot()
-    return pyautogui.screenshot(
-        region=(int(rect["x"]), int(rect["y"]), int(rect["w"]), int(rect["h"]))
-    )
+    before = _topology_snapshot()
+    if not before:
+        raise _CaptureOutOfSurface("no monitors")
+    surface = capture_virtual_surface(before)
+    if _topology_snapshot() != before:
+        raise _CaptureTopologyChanged("monitor topology changed during capture")
+    image = surface["image"]
+    if image.size != (surface["expected_w"], surface["expected_h"]):
+        raise _CaptureExtentMismatch(
+            "capture extent does not match the monitor topology: "
+            f"bitmap {image.size[0]}x{image.size[1]}, "
+            f"topology {surface['expected_w']}x{surface['expected_h']}"
+        )
+    vx, vy = surface["x"], surface["y"]
+    x, y = int(rect["x"]), int(rect["y"])
+    w, h = int(rect["w"]), int(rect["h"])
+    left, top = x - vx, y - vy
+    right, bottom = left + w, top + h
+    if w <= 0 or h <= 0 or left < 0 or top < 0 or right > image.size[0] or bottom > image.size[1]:
+        raise _CaptureOutOfSurface("region is outside the virtual surface")
+    return image.crop((left, top, right, bottom))
+
+
+def _capture_indexed_monitor(monitor_idx):
+    """Resolve a monitor index and grab it from the same topology snapshot."""
+    last = None
+    for _attempt in (1, 2):
+        topology = _topology_snapshot()
+        if monitor_idx < 0 or monitor_idx >= len(topology):
+            raise _CaptureOutOfRange(
+                f"monitor {monitor_idx} out of range: "
+                f"{len(topology)} monitor(s) available"
+            )
+        rect = dict(topology[monitor_idx])
+        try:
+            image = _grab(rect)
+        except _CaptureTopologyChanged as exc:
+            last = exc
+            continue
+        if _topology_snapshot() != topology:
+            last = _CaptureTopologyChanged("monitor topology changed during capture")
+            continue
+        return image, rect, topology
+    raise last or _CaptureTopologyChanged("monitor topology changed during capture")
+
+
+def _capture_region(region_rect):
+    """Grab one global rect, retrying once if the topology changes."""
+    last = None
+    for _attempt in (1, 2):
+        topology = _topology_snapshot()
+        try:
+            image = _grab(region_rect)
+        except _CaptureTopologyChanged as exc:
+            last = exc
+            continue
+        if _topology_snapshot() != topology:
+            last = _CaptureTopologyChanged("monitor topology changed during capture")
+            continue
+        return image, dict(region_rect), topology
+    raise last or _CaptureTopologyChanged("monitor topology changed during capture")
 
 
 def _parse_region(raw):
@@ -702,7 +855,19 @@ def screenshot():
                 400,
             )
         rect = region_rect
-    img = _grab(rect)
+    try:
+        if monitor_idx is not None:
+            img, rect, topology = _capture_indexed_monitor(monitor_idx)
+        elif region_rect is not None:
+            img, rect, topology = _capture_region(region_rect)
+        else:
+            img, rect, topology = _grab(None), None, None
+    except _CaptureOutOfRange as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except _CaptureOutOfSurface as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except (_CaptureTopologyChanged, _CaptureExtentMismatch, _CaptureBackendUnavailable) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
@@ -716,6 +881,11 @@ def screenshot():
             f"{region_rect['x']},{region_rect['y']},"
             f"{region_rect['w']},{region_rect['h']}"
         )
+    if topology is not None and rect is not None:
+        vx, vy, sw, sh = _union(topology)
+        resp.headers["X-Screen-Origin"] = f"{vx},{vy}"
+        resp.headers["X-Screen-Surface"] = f"{sw},{sh}"
+        resp.headers["X-Screen-Rect"] = f"{rect['x']},{rect['y']},{rect['w']},{rect['h']}"
     return resp
 
 
