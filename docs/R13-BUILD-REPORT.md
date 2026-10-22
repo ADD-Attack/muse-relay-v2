@@ -193,3 +193,14 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_motion.py`: 7 passed.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 353 passed, 1 skipped.
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p11 or p12 or p07'`: 7 passed, 14 deselected.
+
+
+## B12 — epoch store and exclusive gateway authority
+
+`services/gateway/epoch_store.py` is the authority store. The gateway process loads it from `bind_claim_authority()` before `serve`. The directory is `MUSE_RELAY_STATE_DIR`, otherwise `services/gateway/state` beside the gateway module. `authority.lock` is an OS exclusive lock and dies with the process. `epoch.json` and `high-water.json` move together by replace-and-fsync. Epochs are positive integers, not UUIDs or wall times.
+
+A second live process is denied. A killed holder lets the next process allocate a strictly higher epoch. A one-step crash (epoch file published, marker not yet updated) is adopted and not reused. Disk failure, a truncated file, a missing half of the pair, and a file rewritten to an older epoch fail closed. The store does not start again at zero. The only reset is `recover("reset-pairing")`. Claim message sequencing stays on the existing push counter until B13 binds messages to this epoch; this package does not pretend those pushes are ordered by the new epoch yet.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_epoch_store.py`: 3 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 356 passed, 1 skipped.

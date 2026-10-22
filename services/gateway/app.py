@@ -28,6 +28,7 @@ import math
 import binascii
 import hashlib
 import hmac
+import importlib.util
 import os
 import threading
 import time
@@ -1993,9 +1994,32 @@ def wait_for():
         time.sleep(min(poll, max(0.0, timeout - waited)))
 
 
+def bind_claim_authority():
+    """Allocate this process's epoch before any claim traffic is served.
+
+    Failure is fail-closed: the process does not start. The directory is
+    MUSE_RELAY_STATE_DIR, otherwise services/gateway/state beside this file.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "epoch_store.py")
+    spec = importlib.util.spec_from_file_location("muse_gateway_epoch_store", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    directory = os.environ.get("MUSE_RELAY_STATE_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "state")
+    store = module.EpochStore(directory)
+    try:
+        held = store.acquire()
+    except module.SyncError as exc:
+        raise SystemExit(f"claim authority fail closed: {exc}") from exc
+    if not held:
+        raise SystemExit("another gateway holds claim authority")
+    return store
+
+
 if __name__ == "__main__":
     from waitress import serve
 
+    _claim_authority = bind_claim_authority()
     # R4 (F9): 8 threads starved act traffic whenever long-poll
     # endpoints (wait_for up to 300 s, screen/wait 25 s, a long type
     # forward up to 600 s) overlapped — every route, /v1/info
