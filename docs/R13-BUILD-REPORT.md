@@ -53,3 +53,13 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p02 or p03 or p04 or p05'`: 8 passed, 13 deselected.
 
 No further pre-existing test expectations changed. Source map: gateway `classify_act_outcome`, `act_queued_get`; UI `STATE_CHIP`, `STATE_COLOR`; existing model `_snapshot_receipt_rows`, `summarize_receipts`, `receipt_state_counts` audited unchanged.
+
+## B04 — receiver-local execution lease protocol
+
+Hands now provides authenticated `/execution/capabilities` and `/execution/lease` (version 1). `_execution_mint` stores opaque, bounded-lifetime boot-bound identities with canonical private operation digests; `_execution_check` validates operation, boot, consumption and equality expiry and atomically consumes one start. Capacity refuses rather than evicting live identities. No mint/check operation injects input. Source map: these helpers/routes in `hands/muse_relay_hands.py`; gateway negotiation and side-effect consumption are B05/B07 integration work.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_execution_leases.py`: 11 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 299 passed, 1 skipped.
+
+Fixtures cover independent receiver clock, wall-time jumps, adversarial transit delay/equality expiry, wrong boot/token/operation, invalid lifetimes, authenticated minting, and a two-thread atomic-start race. Old-hands gateway refusal is tested with B05, where capability negotiation is wired. No packaged runtime claim.

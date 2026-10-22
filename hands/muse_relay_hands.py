@@ -438,6 +438,96 @@ def health():
     return {"ok": True}
 
 
+# R13 B04: receiver-local, boot-bound, single-start execution leases.
+_EXECUTION_VERSION = 1
+_EXECUTION_BOOT = uuid.uuid4().hex
+_execution_lock = threading.RLock()
+_execution_leases = {}
+_EXECUTION_MAX = 512
+
+
+def _operation_digest(op, payload):
+    if not isinstance(payload, dict) or not isinstance(op, str):
+        raise ValueError("invalid operation")
+    clean = {k: v for k, v in payload.items() if k != "_execution_lease"}
+    encoded = json.dumps([op, clean], sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _execution_mint(op, payload, lifetime):
+    if (type(lifetime) not in (int, float) or not math.isfinite(lifetime)
+            or not 1 <= lifetime <= 120):
+        raise ValueError("invalid_lifetime")
+    path = "/clipboard/set" if op == "clipboard_set" else "/" + str(op)
+    if path not in _ACT_PATHS:
+        raise ValueError("invalid_operation")
+    digest = _operation_digest(op, payload)
+    now = time.monotonic()
+    with _execution_lock:
+        for token, row in list(_execution_leases.items()):
+            if row["expires"] <= now:
+                del _execution_leases[token]
+        if len(_execution_leases) >= _EXECUTION_MAX:
+            raise ValueError("lease_capacity")
+        token = secrets_mod.token_urlsafe(32)
+        _execution_leases[token] = {"digest": digest, "expires": now + lifetime,
+                                    "started": False}
+    return {"version": _EXECUTION_VERSION, "boot": _EXECUTION_BOOT, "token": token}
+
+
+def _execution_check(metadata, op, payload, *, start=False):
+    """Called under input access immediately before first effect (B07).
+
+    Receiver time alone decides expiry. No public digest, renewal, or replay.
+    Return a controlled refusal code, or None. Starting consumes atomically.
+    """
+    if (not isinstance(metadata, dict) or type(metadata.get("version")) is not int
+            or metadata.get("version") != _EXECUTION_VERSION):
+        return "lease_invalid"
+    if metadata.get("boot") != _EXECUTION_BOOT:
+        return "lease_wrong_boot"
+    token = metadata.get("token")
+    if not isinstance(token, str):
+        return "lease_invalid"
+    try:
+        digest = _operation_digest(op, payload)
+    except (ValueError, TypeError):
+        return "lease_invalid"
+    with _execution_lock:
+        row = _execution_leases.get(token)
+        if row is None:
+            return "lease_unknown"
+        if row["digest"] != digest:
+            return "lease_operation_changed"
+        if row["started"]:
+            return "lease_consumed"
+        if time.monotonic() >= row["expires"]:
+            return "deadline_expired"
+        if start:
+            row["started"] = True
+    return None
+
+
+@app.get("/execution/capabilities")
+def execution_capabilities():
+    return jsonify({"ok": True, "execution_lease_version": _EXECUTION_VERSION,
+                    "boot": _EXECUTION_BOOT, "max_hold_seconds": 120})
+
+
+@app.post("/execution/lease")
+def execution_lease():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error_code": "lease_invalid"}), 400
+    try:
+        metadata = _execution_mint(body.get("op"), body.get("payload"),
+                                   body.get("hold_seconds"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error_code": "lease_invalid"}), 400
+    return jsonify({"ok": True, "lease": metadata})
+
+
 # ---- capture seams ---------------------------------------------------------
 # Kept as module-level functions so tests can stub the Windows layer and
 # exercise the endpoint logic anywhere.
