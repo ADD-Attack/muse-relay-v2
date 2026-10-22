@@ -1120,6 +1120,40 @@ def _public_receipt(receipt):
     return {k: v for k, v in receipt.items() if not k.startswith("_")}
 
 
+def _held_failure_diagnostics(result):
+    """Retain bounded structured evidence without payload echoes.
+
+    Deliberately omit arbitrary error/debug strings. This is diagnostic
+    retention only; terminal-state classification remains unchanged.
+    """
+    if not isinstance(result, dict):
+        return {"ok": False}
+    safe = {"ok": False}
+    enums = {
+        "error_code": {"type_aborted", "foreground_changed", "locked", "yield"},
+        "abort_reason": {"owner", "locked"},
+        "owner_guard": {"hook", "dwtime", "none", None},
+        "method_used": {"keys", "paste"},
+    }
+    for key, allowed in enums.items():
+        value = result.get(key)
+        if key in result and isinstance(value, (str, type(None))) and value in allowed:
+            safe[key] = value
+    # Hands caps the entire JSON request at 1,000,000 bytes.
+    # This accommodates every supported input character count.
+    for key in ("chars", "chars_typed"):
+        value = result.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000:
+            safe[key] = value
+    if ("chars" in safe and "chars_typed" in safe
+            and safe["chars_typed"] > safe["chars"]):
+        safe.pop("chars")
+        safe.pop("chars_typed")
+    if isinstance(result.get("aborted"), bool):
+        safe["aborted"] = result["aborted"]
+    return safe
+
+
 def _pump_receipt(receipt, now):
     """One retry step for a held receipt. Returns the receipt.
 
@@ -1163,7 +1197,7 @@ def _pump_receipt(receipt, now):
             return receipt
         if failed or status is None:
             receipt["state"] = "failed"
-            receipt["result"] = None
+            receipt["result"] = _held_failure_diagnostics(result)
             _pending_payloads.pop(receipt["id"], None)
             return receipt
         receipt["state"] = "applied"
