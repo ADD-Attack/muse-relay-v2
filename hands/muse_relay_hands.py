@@ -767,28 +767,43 @@ class _input:
         self.kind = kind
         self.started = False
 
-    def check(self):
+    def check(self, start=False):
         if not has_request_context():
             return
-        refused = _yield_if_active()
-        if refused is None:
+        if self.started:
             refused = _focus_guard()
-        if refused is not None:
-            raise _InputRefused(refused)
+            reason = "foreground_changed" if refused is not None else None
+            # Typing owns its partial-count lock checkpoints; B10 unifies
+            # those without losing the structured type-abort response.
+            if request.path != "/type" and _probe_locked() is True:
+                reason = "locked"
+            if reason:
+                raise _InputRefused((jsonify({"ok": False, "aborted": True,
+                    "error_code": "input_aborted", "abort_reason": reason}), 409))
+        else:
+            refused = _yield_if_active()
+            if refused is None:
+                refused = _focus_guard()
+            if refused is not None:
+                raise _InputRefused(refused)
         body = request.get_json(silent=True) or {}
-        if "_execution_lease" in body:
+        if not self.started and "_execution_lease" in body:
             op = "clipboard_set" if request.path == "/clipboard/set" else request.path.lstrip("/")
-            code = _execution_check(body["_execution_lease"], op, body)
+            code = _execution_check(body["_execution_lease"], op, body, start=start)
             if code:
                 raise _InputRefused((jsonify({"ok": False, "error_code": code}), 409))
+
+    def before_effect(self):
+        self.check(start=not self.started)
+        if not self.started:
+            _resting.act_begin()
+            self.started = True
 
     def __enter__(self):
         _INPUT.acquire(self.kind, random)
         try:
             self.check()
             _guard_local.current = self
-            _resting.act_begin()
-            self.started = True
             return self
         except BaseException:
             _INPUT.release(self.kind)
@@ -802,6 +817,17 @@ class _input:
             _guard_local.current = None
             _INPUT.release(self.kind)
         return False
+
+
+def _before_effect():
+    guard = getattr(_guard_local, "current", None)
+    if guard is not None:
+        guard.before_effect()
+
+
+def _inject(function, *args, **kwargs):
+    _before_effect()
+    return function(*args, **kwargs)
 
 
 def _human(d):
@@ -822,7 +848,7 @@ def _plan_path(x0, y0, x1, y1, rng, width=None, path_seconds=None):
 
 def _run_path(steps):
     for sx, sy, delay in steps:
-        pyautogui.moveTo(sx, sy, duration=0)
+        _inject(pyautogui.moveTo, sx, sy, duration=0)
         time.sleep(delay)
 
 
@@ -856,7 +882,7 @@ def move():
                 time.sleep(motion.attention_delay(random, d.get("text_chars")))
             _move_human(x, y, width=min(w, h) if w else None)
         else:
-            pyautogui.moveTo(x, y, duration=0.2)
+            _inject(pyautogui.moveTo, x, y, duration=0.2)
     return {"ok": True}
 
 
@@ -874,8 +900,8 @@ def click():
     button = d.get("button", "left")
     if not _human(d):
         with _input("mouse"):
-            pyautogui.moveTo(x, y, duration=0.2)
-            pyautogui.click(x=x, y=y, button=button)
+            _inject(pyautogui.moveTo, x, y, duration=0.2)
+            _inject(pyautogui.click, x=x, y=y, button=button)
         return {"ok": True}
     rng = random
     w, h = _box(d)
@@ -898,8 +924,9 @@ def click():
             time.sleep(attention)
         _move_human(tx, ty, rng, path_seconds=travel)
         time.sleep(hover)
-        pyautogui.mouseDown(x=tx, y=ty, button=button)
+        _before_effect()
         try:
+            _inject(pyautogui.mouseDown, x=tx, y=ty, button=button)
             time.sleep(hold)
         finally:
             pyautogui.mouseUp(x=tx, y=ty, button=button)
@@ -924,11 +951,15 @@ def _type_dispatch(method, keys_fn, paste_fn, text):
     if method == "paste":
         try:
             return paste_fn(), None
+        except _InputRefused:
+            raise
         except Exception as exc:
             return keys_fn(), f"paste requested but unavailable ({exc}); used keys"
     if len(text) > 120 and _clipboard_backend() is not None:
         try:
             return paste_fn(), None
+        except _InputRefused:
+            raise
         except Exception as exc:
             return keys_fn(), f"paste failed ({exc}); used keys"
     return keys_fn(), None
@@ -948,7 +979,7 @@ def type_text():
 
     Jitter (wishlist #16): the keystroke path types per character with
     human-band delays from _plan_key_delays unless jitter is false —
-    false restores the original single pyautogui.write(interval=0.02).
+    false restores the original single _inject(pyautogui.write, interval=0.02).
 
     Response: {"ok", "method_used", "chars", "elapsed_seconds",
     "delays_planned", "planned_seconds"} — the delay fields describe the
@@ -1010,13 +1041,13 @@ def type_text():
                     if _probe_locked() is True:
                         state["reason"] = "locked"
                         break
-                pyautogui.write(ch)
+                _inject(pyautogui.write, ch)
                 guard.after_write()
                 time.sleep(delay)
                 typed += 1
             state["guard"] = guard.mode
         else:
-            pyautogui.write(text, interval=0.02)
+            _inject(pyautogui.write, text, interval=0.02)
             typed = len(text)
         return "keys"
 
@@ -1030,15 +1061,18 @@ def type_text():
             readable = True
         except Exception:
             pass  # unreadable clipboard: paste anyway, skip the restore
+        mutated = False
         try:
+            _before_effect()
+            mutated = True
             backend.set_text(text)
-            pyautogui.hotkey("ctrl", "v")
+            _inject(pyautogui.hotkey, "ctrl", "v")
             if readable:
                 # Give the target app a beat to consume the paste before the
                 # previous clipboard contents go back.
                 time.sleep(0.1)
         finally:
-            if readable and saved is not None:
+            if mutated and readable and saved is not None:
                 try:
                     backend.set_text(saved)
                 except Exception:
@@ -1095,7 +1129,7 @@ def type_text():
 def key():
     d = request.get_json(force=True)
     with _input("keys"):
-        pyautogui.press(d["key"])
+        _inject(pyautogui.press, d["key"])
     return {"ok": True}
 
 
@@ -1108,11 +1142,11 @@ def scroll():
     with _input("mouse"):
         if _human(d):
             for chunk, pause in motion.plan_scroll(clicks, random):
-                pyautogui.scroll(chunk)
+                _inject(pyautogui.scroll, chunk)
                 if pause:
                     time.sleep(pause)
         else:
-            pyautogui.scroll(clicks)
+            _inject(pyautogui.scroll, clicks)
     return {"ok": True}
 
 
@@ -1770,7 +1804,7 @@ class _RestingHand:
                 if abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1:
                     fought = True
                     break
-                pyautogui.moveTo(sx, sy, duration=0)
+                _inject(pyautogui.moveTo, sx, sy, duration=0)
                 expect = (sx, sy)
                 if delay > 0:
                     time.sleep(delay)
@@ -2083,7 +2117,7 @@ def hotkey():
     ):
         return jsonify({"ok": False, "error": "keys must be a non-empty list of strings"}), 400
     with _input("keys"):
-        pyautogui.hotkey(*keys)
+        _inject(pyautogui.hotkey, *keys)
     return {"ok": True}
 
 
@@ -2091,12 +2125,12 @@ def hotkey():
 def break_():
     """Send Ctrl+C as a true chord, 1..3 times (default 1), 0.15s apart.
 
-    Root cause this fixes: the /key op calls pyautogui.press() with ONE
+    Root cause this fixes: the /key op calls _inject(pyautogui.press, ) with ONE
     key name, so sending the string "ctrl+c" to /key was never a real
     chord — press() treats it as a single (nonexistent) key name and
     nothing was interrupted. A long-running / polling foreground process
     therefore could not be stopped through the relay. /break (and
-    /hotkey) use pyautogui.hotkey(), which presses the keys together,
+    /hotkey) use _inject(pyautogui.hotkey, ), which presses the keys together,
     so the interrupt actually lands.
     """
     refused = _yield_if_active()
@@ -2108,7 +2142,7 @@ def break_():
         return jsonify({"ok": False, "error": "times must be an integer 1..3"}), 400
     with _input("keys"):
         for i in range(times):
-            pyautogui.hotkey("ctrl", "c")
+            _inject(pyautogui.hotkey, "ctrl", "c")
             if i < times - 1:
                 time.sleep(0.15)
     return {"ok": True, "times": times}
@@ -2143,18 +2177,18 @@ def drag():
             _move_human(x1, y1)
             time.sleep(motion.hover_delay(random))
         else:
-            pyautogui.moveTo(x1, y1)
+            _inject(pyautogui.moveTo, x1, y1)
         down = False
         try:
             # Mark first so a mouseDown/move failure still releases the button.
             # duration 0 is real; do not coerce it with `or 0.4`.
             down = True
-            pyautogui.mouseDown(button=button)
+            _inject(pyautogui.mouseDown, button=button)
             if human:
                 time.sleep(motion.click_hold(random))
                 _move_human(x2, y2, path_seconds=duration)
             else:
-                pyautogui.moveTo(x2, y2, duration=0.4 if duration is None else duration)
+                _inject(pyautogui.moveTo, x2, y2, duration=0.4 if duration is None else duration)
         finally:
             if down:
                 pyautogui.mouseUp(button=button)
@@ -2370,7 +2404,7 @@ def focus():
             candidate = (win.get("title") or "").casefold()
             matched = candidate == needle if exact else needle in candidate
             if matched:
-                if not _activate_window(win):
+                if not _inject(_activate_window, win):
                     return (
                         jsonify(
                             {
@@ -2501,6 +2535,7 @@ def clipboard_set():
     if backend is None:
         return jsonify({"ok": False, "error": "clipboard unavailable on this host"}), 501
     with _input("keys"):
+        _before_effect()
         try:
             backend.set_text(text)
         except Exception as exc:
