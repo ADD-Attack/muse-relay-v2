@@ -253,9 +253,20 @@ def _yield_if_active():
     except (TypeError, ValueError):
         threshold = 5.0
     locked, idle_seconds = _probe_lock_state()
-    # R9 (#28): input inside a recorded resting-hand span is ours, not the
-    # owner's — owner idle keeps counting from the owner's last input.
-    idle_seconds = _LEDGER.owner_idle(idle_seconds, _tick_ms())
+    # Hooks win over a timestamp span: a physical event during our own
+    # injection is still the owner's. A quiet hook plus a span that
+    # explains the idle tick is not owner activity. Idle with no such
+    # span remains the signal used when hooks have not observed it.
+    now_tick = _tick_ms()
+    if _owner_hook_recent(threshold):
+        idle_seconds = 0.0
+    else:
+        last = _LEDGER.last_input_tick(idle_seconds, now_tick)
+        if (owner_coverage() == "hook" and last is not None
+                and _LEDGER._is_self(last)):
+            idle_seconds = max(float(idle_seconds or 0.0), threshold)
+        else:
+            idle_seconds = _LEDGER.owner_idle(idle_seconds, now_tick)
     if locked is True:
         return (
             jsonify(
@@ -836,7 +847,13 @@ def _before_effect():
 
 def _inject(function, *args, **kwargs):
     _before_effect()
-    return function(*args, **kwargs)
+    started = _tick_ms()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        ended = _tick_ms()
+        if started is not None and ended is not None:
+            _LEDGER.record(started, ended)
 
 
 def _human(d):
@@ -1365,6 +1382,50 @@ def _owner_input_snapshot():
     return _owner_monitor.snapshot()
 
 
+# Persistent across actions. A fresh per-action snapshot would forget
+# physical input that happened before the action started.
+_owner_observed = {"count": None, "at": None}
+_owner_degraded = {"reason": None}
+
+
+def _observe_owner_counter():
+    snap = _owner_input_snapshot()
+    if not isinstance(snap, tuple) or not snap:
+        return None
+    try:
+        owner = int(snap[0])
+    except (TypeError, ValueError):
+        return None
+    if _owner_observed["count"] is not None and owner != _owner_observed["count"]:
+        _owner_observed["at"] = time.monotonic()
+    _owner_observed["count"] = owner
+    return owner
+
+
+def _owner_hook_recent(threshold):
+    """True when a physical hook event is still inside the yield window."""
+    _observe_owner_counter()
+    at = _owner_observed["at"]
+    try:
+        window = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    return at is not None and (time.monotonic() - at) < window
+
+
+def owner_coverage():
+    """hook, unavailable, or degraded. Degraded is never reported as reliable."""
+    if _owner_degraded["reason"]:
+        return "degraded"
+    if isinstance(_owner_input_snapshot(), tuple):
+        return "hook"
+    return "unavailable"
+
+
+def mark_owner_coverage_degraded(reason):
+    _owner_degraded["reason"] = str(reason or "degraded")
+
+
 # Our own keystroke may publish its dwTime AFTER the post-write probe
 # (Finding 5). In the dwTime fallback, an advance stamped no later than
 # this many ms after our write returned is attributed to that write.
@@ -1741,6 +1802,10 @@ class _RestingHand:
                 return 0.5
             if self.acting or self.owner_stopped:
                 return self.POLL
+        if owner_coverage() == "degraded":
+            with self._lock:
+                self._end()
+            return 1.0
         locked, raw_idle = _probe_lock_state()
         now_tick = _tick_ms()
         with self._lock:
@@ -1909,6 +1974,7 @@ def state():
         locked, idle_seconds = None, None
     body = {"ok": True, "platform": platform, "locked": locked, "idle_seconds": idle_seconds}
     body["owner_idle_seconds"] = _LEDGER.owner_idle(idle_seconds, _tick_ms())
+    body["owner_coverage"] = owner_coverage()
     body["resting_hand"] = _resting.status()
     body["human_motion"] = _human_motion_default()
     # Display sleep follows the OS idle clock, which injected input

@@ -143,3 +143,12 @@ P06 is covered by `test_p06_locked_without_target_is_terminal`. Windows packaged
 Commands:
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p11`: 2 passed, 19 deselected.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r11_resting_watch.py tests/test_r12_rest_float.py`: 40 passed.
+
+
+## B09 — owner observation service
+
+`_observe_owner_counter` keeps the physical-event count and the monotonic time of the latest count change across actions. A hook event inside the yield window yields even when a self-input span covers the idle timestamp. A quiet hook does not treat a span-explained idle tick as owner activity; an unexplained idle change still yields. `mark_owner_coverage_degraded` stops new resting glides and `/state` reports `owner_coverage: degraded` without claiming reliable discrimination. Ordinary injections record their tick span. Tick rollover stays on the existing modular `tick_diff`. A mid-glide exception still truncates the provisional span.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_owner_service.py tests/test_relay_fix_acceptance.py -k 'recent_owner or degraded_coverage or tick_rollover or p07 or p11'`: 8 passed, 16 deselected.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 337 passed, 1 skipped.
