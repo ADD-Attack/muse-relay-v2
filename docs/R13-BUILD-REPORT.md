@@ -204,3 +204,64 @@ A second live process is denied. A killed holder lets the next process allocate 
 Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_epoch_store.py`: 3 passed.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 356 passed, 1 skipped.
+
+
+## B13 — hands epoch validation and receiver-timed permits
+
+Authoritative pushes carry pairing, epoch, sequence, hands boot, stable claim id, and a single-use challenge fetched at send time. Hands anchors the motion permit at challenge issuance plus the remaining lease, and never later than issuance plus 2 seconds. `SYNC_REFRESH_S` is 0.5 for the later refresh loop. A higher epoch wins even with a lower sequence. Duplicate grants acknowledge without moving the deadline. A grant that arrives after its own lease does not activate. The accepted epoch is stored before motion is enabled; a failed store leaves motion off and sets `sync_error`. A new hands boot clears grants. An old boot id cannot revive them. The persisted epoch still rejects anything older.
+
+The legacy `{held, expires_in, seq}` body still applies. `tests/test_r11_resting_watch.py::test_resting_claim_route_validates` asserts that body, and this package does not change that assertion. The bound gateway does not use that body.
+
+P09 setup only. No assertion line in `tests/test_relay_fix_acceptance.py` changed. Exact diff against the pre-B13 file:
+
+```diff
+diff --git a/tests/test_relay_fix_acceptance.py b/tests/test_relay_fix_acceptance.py
+index c76f20e..1bce8c2 100644
+--- a/tests/test_relay_fix_acceptance.py
++++ b/tests/test_relay_fix_acceptance.py
+@@ -8,12 +8,13 @@ They use simulated desktop/network boundaries; Windows acceptance is separate.
+ The framework defines new watcher fields and claim-sync behavior used here.
+ """
+ import importlib.util
+ from io import BytesIO
+ import itertools
+ import os
++import tempfile
+ from pathlib import Path
+ import random
+ import sys
+ import threading
+ import types
+ from urllib.parse import urlsplit
+@@ -289,21 +290,26 @@ def test_p09_gateway_restart_release_reaches_surviving_hands(gateway, hands, mon
+ 
+     monkeypatch.setattr(gateway.requests, "post", local_post)
+     monkeypatch.setattr(gateway.requests, "get", local_get)
+     monkeypatch.setattr(gateway._claim_push_session, "post", local_post)
+     monkeypatch.setattr(gateway._claim_push_session, "get", local_get)
+     monkeypatch.setattr(gateway.threading, "Thread", ImmediateThread)
++    authority_dir = tempfile.mkdtemp()
++    hands._claim_sync = hands.claim_sync.ClaimSync(os.path.join(authority_dir, "hands"))
++    gateway.bind_claim_authority(authority_dir)
+     gateway._claim_push_seq = 6
+     gateway._claim = {"holder": "old", "purpose": "test", "expires_at": clock.value + 60}
+     gateway._push_claim_locked(gateway._claim, clock.value)
+     assert hands._resting.claim_held(hands._resting._clock())
++    gateway._claim_authority.release()
+     restarted = load("services/gateway/app.py")
+     restarted.HANDS_SECRET = hands.SHARED_SECRET
+     restarted.time = clock
+     monkeypatch.setattr(restarted._claim_push_session, "post", local_post)
+     monkeypatch.setattr(restarted._claim_push_session, "get", local_get)
++    restarted.bind_claim_authority(authority_dir)
+     restarted._claim = None
+     restarted._push_claim_locked(None, clock.value)
+     assert not hands._resting.claim_held(hands._resting._clock())
+```
+
+`hands/test_process_wait.py` also copies the new sibling `claim_sync.py` into its temporary import directory, the same way it already copies `motion.py`. No assertion there changed.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_claim_sync.py`: 6 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 362 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p09`: 1 passed, 20 deselected.

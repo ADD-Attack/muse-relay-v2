@@ -134,6 +134,18 @@ def _load_motion():
 
 motion = _load_motion()
 
+
+def _load_claim_sync():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claim_sync.py")
+    spec = importlib.util.spec_from_file_location("muse_relay_claim_sync", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+claim_sync = _load_claim_sync()
+
 # ---------------------------------------------------------------- server
 
 app = Flask(__name__)
@@ -150,6 +162,7 @@ LOCKOUT_SECONDS = 300  # ...5 minutes (restart the app to clear early)
 _BASE_DIR = os.path.dirname(
     os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__)
 )
+_claim_sync = claim_sync.ClaimSync(os.environ.get("HANDS_SYNC_DIR") or os.path.join(_BASE_DIR, "claim-sync"))
 _CONFIG_PATH = os.path.join(_BASE_DIR, "muse_relay_config.json")
 _LOG_FILE = os.path.join(_BASE_DIR, "muse_relay.log")
 
@@ -2124,10 +2137,40 @@ def resting_get():
     return {"ok": True, **_resting.status()}
 
 
+@app.get("/resting/challenge")
+def resting_challenge():
+    """Single-use permit challenge, timed on this receiver's monotonic clock."""
+    return jsonify(_claim_sync.issue(time.monotonic()))
+
+
+def _restart_hands_boot():
+    """Test and lifecycle seam: a new boot drops every grant."""
+    _claim_sync.rotate_boot()
+    with _resting._lock:
+        _resting.claim_until = None
+        _resting.claim_seq = -1
+        _resting._end()
+
+
 @app.post("/resting/claim")
 def resting_claim():
-    """Gateway push: {held: bool, expires_in: seconds, seq: int}."""
+    """Gateway push.
+
+    Legacy: {held, expires_in, seq}. Authoritative: those fields plus
+    pairing, epoch, boot, and a single-use challenge. The legacy body
+    remains because existing direct callers assert it still applies.
+    """
     d = request.get_json(force=True, silent=True) or {}
+    if any(key in d for key in ("epoch", "pairing", "boot", "challenge")):
+        result = _claim_sync.evaluate(d, time.monotonic(), _resting)
+        if result.get("invalid"):
+            return jsonify({"ok": False, "error": "claim sync message is invalid"}), 400
+        if result.get("applied") and d.get("held") is True:
+            start_resting_hand()
+        body = {"ok": True, "applied": bool(result.get("applied")), **_resting.status()}
+        if _claim_sync.sync_error:
+            body["sync_error"] = _claim_sync.sync_error
+        return body
     held, seq = d.get("held"), d.get("seq")
     expires_in = d.get("expires_in", 0)
     if (
@@ -2163,6 +2206,12 @@ def state():
     body["owner_idle_seconds"] = _LEDGER.owner_idle(idle_seconds, _tick_ms())
     body["owner_coverage"] = owner_coverage()
     body["owner_attribution_limit"] = _owner_attribution_limit()
+    body["claim_sync"] = {
+        "boot": _claim_sync.boot,
+        "epoch": _claim_sync.accepted_epoch,
+        "ok": _claim_sync.sync_error is None,
+        "error": _claim_sync.sync_error,
+    }
     body["resting_hand"] = _resting.status()
     body["human_motion"] = _human_motion_default()
     # Display sleep follows the OS idle clock, which injected input

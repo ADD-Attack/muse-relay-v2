@@ -11,6 +11,7 @@ import importlib.util
 from io import BytesIO
 import itertools
 import os
+import tempfile
 from pathlib import Path
 import random
 import sys
@@ -292,15 +293,20 @@ def test_p09_gateway_restart_release_reaches_surviving_hands(gateway, hands, mon
     monkeypatch.setattr(gateway._claim_push_session, "post", local_post)
     monkeypatch.setattr(gateway._claim_push_session, "get", local_get)
     monkeypatch.setattr(gateway.threading, "Thread", ImmediateThread)
+    authority_dir = tempfile.mkdtemp()
+    hands._claim_sync = hands.claim_sync.ClaimSync(os.path.join(authority_dir, "hands"))
+    gateway.bind_claim_authority(authority_dir)
     gateway._claim_push_seq = 6
     gateway._claim = {"holder": "old", "purpose": "test", "expires_at": clock.value + 60}
     gateway._push_claim_locked(gateway._claim, clock.value)
     assert hands._resting.claim_held(hands._resting._clock())
+    gateway._claim_authority.release()
     restarted = load("services/gateway/app.py")
     restarted.HANDS_SECRET = hands.SHARED_SECRET
     restarted.time = clock
     monkeypatch.setattr(restarted._claim_push_session, "post", local_post)
     monkeypatch.setattr(restarted._claim_push_session, "get", local_get)
+    restarted.bind_claim_authority(authority_dir)
     restarted._claim = None
     restarted._push_claim_locked(None, clock.value)
     assert not hands._resting.claim_held(hands._resting._clock())

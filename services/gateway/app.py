@@ -105,15 +105,29 @@ _claim_push_session = requests.Session()
 
 def _post_claim_to_hands(payload):
     try:
+        body = dict(payload)
+        if "epoch" in body:
+            challenge = _claim_push_session.get(
+                f"{HANDS_URL}/resting/challenge", headers=_hands_headers(), timeout=3
+            )
+            issued = challenge.json()
+            body["challenge"] = issued["challenge"]
+            body["boot"] = issued["boot"]
         _claim_push_session.post(
-            f"{HANDS_URL}/resting/claim", json=payload, headers=_hands_headers(), timeout=3
+            f"{HANDS_URL}/resting/claim", json=body, headers=_hands_headers(), timeout=3
         )
-    except requests.RequestException:
+    except (requests.RequestException, ValueError, KeyError, TypeError):
         pass  # the hands is down or older: no resting hand, nothing else changes
 
 
 def _push_claim_locked(claim, now):
-    """Queue a claim-state push to the hands; call with _claim_lock held."""
+    """Queue a claim-state push to the hands; call with _claim_lock held.
+
+    With a bound epoch store the payload carries pairing, epoch, sequence,
+    and the stable claim id. The receiver challenge is fetched at send
+    time so the permit is anchored before network delay. Unbound pushes
+    keep the legacy three-field body for in-process callers.
+    """
     global _claim_push_seq
     _claim_push_seq += 1
     payload = {
@@ -121,6 +135,11 @@ def _push_claim_locked(claim, now):
         "expires_in": max(0.0, float(claim["expires_at"]) - now) if claim else 0.0,
         "seq": _claim_push_seq,
     }
+    authority = _claim_authority
+    if authority is not None and authority.serving:
+        payload["epoch"] = authority.epoch
+        payload["pairing"] = authority.pairing
+        payload["claim_id"] = None if claim is None else claim.get("id")
     threading.Thread(target=_post_claim_to_hands, args=(payload,), daemon=True).start()
 
 
@@ -563,6 +582,7 @@ def hands_claim():
             "purpose": purpose,
             "since": now,
             "expires_at": now + ttl,
+            "id": uuid.uuid4().hex,
         }
         _push_claim_locked(_claim, now)
         return jsonify({"ok": True, "granted": True, "claim": dict(_claim)})
@@ -1994,18 +2014,24 @@ def wait_for():
         time.sleep(min(poll, max(0.0, timeout - waited)))
 
 
-def bind_claim_authority():
+_claim_authority = None
+
+
+def bind_claim_authority(directory=None):
     """Allocate this process's epoch before any claim traffic is served.
 
     Failure is fail-closed: the process does not start. The directory is
-    MUSE_RELAY_STATE_DIR, otherwise services/gateway/state beside this file.
+    the argument, else MUSE_RELAY_STATE_DIR, else services/gateway/state
+    beside this file. The returned store stays held until release().
     """
+    global _claim_authority
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "epoch_store.py")
     spec = importlib.util.spec_from_file_location("muse_gateway_epoch_store", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    directory = os.environ.get("MUSE_RELAY_STATE_DIR") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "state")
+    if directory is None:
+        directory = os.environ.get("MUSE_RELAY_STATE_DIR") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "state")
     store = module.EpochStore(directory)
     try:
         held = store.acquire()
@@ -2013,13 +2039,14 @@ def bind_claim_authority():
         raise SystemExit(f"claim authority fail closed: {exc}") from exc
     if not held:
         raise SystemExit("another gateway holds claim authority")
+    _claim_authority = store
     return store
 
 
 if __name__ == "__main__":
     from waitress import serve
 
-    _claim_authority = bind_claim_authority()
+    bind_claim_authority()
     # R4 (F9): 8 threads starved act traffic whenever long-poll
     # endpoints (wait_for up to 300 s, screen/wait 25 s, a long type
     # forward up to 600 s) overlapped — every route, /v1/info
