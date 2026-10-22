@@ -1324,8 +1324,14 @@ def _prepare_queued_execution(op, payload, hold):
             return None
         # Pin before minting: the digest cannot change on a later retry.
         hwnd = caps.get("foreground_hwnd")
-        if "expect_focus" not in payload and op != "focus" and type(hwnd) is int and hwnd > 0:
-            payload["expect_focus"] = {"hwnd": hwnd}
+        instance = caps.get("process_instance")
+        # A locked desktop has no trustworthy foreground. Do not pin one.
+        if (caps.get("locked") is not True and "expect_focus" not in payload
+                and op != "focus" and type(hwnd) is int and hwnd > 0):
+            pin = {"hwnd": hwnd}
+            if isinstance(instance, str) and instance:
+                pin["process_instance"] = instance
+            payload["expect_focus"] = pin
         response = requests.post(f"{HANDS_URL}/execution/lease",
             headers=_hands_headers(), timeout=HANDS_TIMEOUT,
             json={"op": op, "payload": payload, "hold_seconds": hold})
@@ -1492,6 +1498,11 @@ def act_queued():
     _store_receipt(receipt)
     context = {"hold": hold, "lease": None}
     state, status, safe, result = _queued_attempt(op, payload, context)
+    if (state == "held" and isinstance(result, dict)
+            and result.get("error_code") == "locked"
+            and "expect_focus" not in payload):
+        state = "failed"
+        safe = {"ok": False, "error_code": "target_unknown"}
     if state != "held":
         # R4 (F4): settle a receipt for the direct result too — no
         # payload is retained (nothing is held), and the id rides in
@@ -1529,6 +1540,7 @@ def act_queued():
         "expect_focus" not in payload
         and op != "focus"
         and isinstance(result, dict)
+        and result.get("error_code") != "locked"
         and isinstance(result.get("foreground_hwnd"), int)
         and not isinstance(result.get("foreground_hwnd"), bool)
     ):

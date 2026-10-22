@@ -123,3 +123,14 @@ Muse authorized the minimal setup change in `tests/test_r11_resting_watch.py::te
 
 Reruns after the setup change:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 331 passed, 1 skipped (prior interrupted session).
+
+
+## B08 — held target policy
+
+Locked queued acts without a caller target now settle `failed` / `target_unknown` and drop the payload. A locked response cannot contribute a foreground pin. Caller `expect_focus`, including `process_instance`, is preserved. Capability pinning skips `locked: true` and includes a process instance when supplied. `_focus_matches` fails closed when a requested process instance is missing, stopped, or different. Focus re-enumerates the selected window under input access and returns `target_unavailable` if it disappeared before activation.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_targets.py`: 3 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 334 passed, 1 skipped.
+
+P06 is covered by `test_p06_locked_without_target_is_terminal`. Windows packaged focus races remain unverified.

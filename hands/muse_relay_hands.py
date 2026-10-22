@@ -330,6 +330,15 @@ def _focus_matches(expect, win):
         return False
     if want_process and str(want_process).lower() not in (win.get("process") or "").lower():
         return False
+    want_instance = expect.get("process_instance")
+    if isinstance(want_instance, str) and want_instance:
+        pid = win.get("pid")
+        try:
+            snap = _process_snapshot(pid) if type(pid) is int and pid > 0 else None
+        except Exception:
+            return False
+        if not isinstance(snap, dict) or snap.get("running") is not True or snap.get("instance") != want_instance:
+            return False
     return True
 
 
@@ -2404,7 +2413,13 @@ def focus():
             candidate = (win.get("title") or "").casefold()
             matched = candidate == needle if exact else needle in candidate
             if matched:
-                if not _inject(_activate_window, win):
+                current = next((item for item in _enum_windows()
+                                if item.get("_hwnd") == win.get("_hwnd")
+                                and (item.get("title") or "").casefold() == candidate), None)
+                if current is None:
+                    return jsonify({"ok": False, "error_code": "target_unavailable",
+                                    "error": "focus target disappeared"}), 409
+                if not _inject(_activate_window, current):
                     return (
                         jsonify(
                             {
