@@ -103,32 +103,114 @@ _claim_push_seq = 0
 _claim_push_session = requests.Session()
 
 
+_sync_latest = None
+_sync_running = False
+_sync_health = {"ok": True, "error": None, "epoch": None, "seq": None, "attempts": 0}
+SYNC_RETRY_MAX_S = 0.5
+
+
 def _post_claim_to_hands(payload):
     try:
         body = dict(payload)
-        if "epoch" in body:
+        if "epoch" in body and "challenge" not in body:
             challenge = _claim_push_session.get(
                 f"{HANDS_URL}/resting/challenge", headers=_hands_headers(), timeout=3
             )
             issued = challenge.json()
             body["challenge"] = issued["challenge"]
             body["boot"] = issued["boot"]
-        _claim_push_session.post(
+            payload["challenge"] = body["challenge"]
+            payload["boot"] = body["boot"]
+        return _claim_push_session.post(
             f"{HANDS_URL}/resting/claim", json=body, headers=_hands_headers(), timeout=3
         )
     except (requests.RequestException, ValueError, KeyError, TypeError):
-        pass  # the hands is down or older: no resting hand, nothing else changes
+        return False  # retry the latest snapshot; do not drop it
+
+
+def _ack_ok(response, payload):
+    """None means a test replaced the sender. False means try again."""
+    if response is None:
+        return True
+    if response is False:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    if not isinstance(body, dict) or body.get("ok") is not True or body.get("applied") is not True:
+        return False
+    if "epoch" not in payload:
+        return True
+    return (
+        body.get("boot") == payload.get("boot")
+        and body.get("epoch") == payload.get("epoch")
+        and body.get("seq") == payload.get("seq")
+        and body.get("claim_id") == payload.get("claim_id")
+    )
+
+
+def _sync_loop():
+    """One worker. A newer snapshot replaces one that has not been sent."""
+    global _sync_running, _sync_latest, _claim_push_seq
+    delay = 0.0
+    try:
+        while True:
+            if delay:
+                time.sleep(delay)
+            with _claim_lock:
+                payload = _sync_latest
+                _sync_latest = None
+            if payload is None:
+                return
+            response = _post_claim_to_hands(payload)
+            if _ack_ok(response, payload):
+                _sync_health.update({
+                    "ok": True, "error": None, "attempts": 0,
+                    "epoch": payload.get("epoch"), "seq": payload.get("seq"),
+                })
+                delay = 0.0
+                if _sync_latest is None:
+                    return
+                continue
+            _sync_health.update({
+                "ok": False,
+                "error": "unreachable" if response is False else "ack rejected",
+                "attempts": int(_sync_health.get("attempts") or 0) + 1,
+                "epoch": payload.get("epoch"),
+                "seq": payload.get("seq"),
+            })
+            delay = SYNC_RETRY_MAX_S if delay >= SYNC_RETRY_MAX_S else max(0.05, (delay or 0.025) * 2)
+            with _claim_lock:
+                if _sync_latest is None:
+                    _claim_push_seq += 1
+                    retried = dict(payload)
+                    retried["seq"] = _claim_push_seq
+                    retried.pop("challenge", None)
+                    retried.pop("boot", None)
+                    _sync_latest = retried
+    finally:
+        _sync_running = False
+        if _sync_latest is not None:
+            _ensure_sync_worker()
+
+
+def _ensure_sync_worker():
+    global _sync_running
+    if _sync_running:
+        return
+    _sync_running = True
+    threading.Thread(target=_sync_loop, args=(), daemon=True).start()
 
 
 def _push_claim_locked(claim, now):
-    """Queue a claim-state push to the hands; call with _claim_lock held.
+    """Remember the latest claim snapshot and wake the one sync worker.
 
-    With a bound epoch store the payload carries pairing, epoch, sequence,
-    and the stable claim id. The receiver challenge is fetched at send
-    time so the permit is anchored before network delay. Unbound pushes
-    keep the legacy three-field body for in-process callers.
+    Call with _claim_lock held. A bound epoch store adds pairing, epoch,
+    and the stable claim id. The challenge is fetched when the worker
+    sends, not when the snapshot is taken.
     """
-    global _claim_push_seq
+    global _claim_push_seq, _sync_latest
     _claim_push_seq += 1
     payload = {
         "held": claim is not None,
@@ -140,7 +222,15 @@ def _push_claim_locked(claim, now):
         payload["epoch"] = authority.epoch
         payload["pairing"] = authority.pairing
         payload["claim_id"] = None if claim is None else claim.get("id")
-    threading.Thread(target=_post_claim_to_hands, args=(payload,), daemon=True).start()
+    _sync_latest = payload
+    _ensure_sync_worker()
+
+
+def reconcile_claim_snapshot():
+    """Startup: an absent claim is an explicit release, not silence."""
+    now = time.time()
+    with _claim_lock:
+        _push_claim_locked(_current_claim_locked(now), now)
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +530,7 @@ def info():
             "pc_state": pc_state,
             "watchers": _current_watchers(),
             "watcher_timeout_seconds": _watcher_timeout_setting(),
+            "claim_sync": dict(_sync_health),
         }
     )
 
@@ -2040,6 +2131,7 @@ def bind_claim_authority(directory=None):
     if not held:
         raise SystemExit("another gateway holds claim authority")
     _claim_authority = store
+    reconcile_claim_snapshot()
     return store
 
 

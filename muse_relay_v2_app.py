@@ -427,6 +427,7 @@ def build_dashboard_model(info, claim, queue, reserved_for, receipts, now):
         "pc": pc,
         "feed": summarize_receipts(receipts, now),
         "counts": receipt_state_counts(receipts),
+        "sync": info_dict.get("claim_sync") if isinstance(info_dict.get("claim_sync"), dict) else None,
     }
 
 
@@ -449,6 +450,9 @@ def format_diagnostics(model, stamp):
         lines.append(text)
     else:
         lines.append("Claim: none")
+    sync = model.get("sync")
+    if isinstance(sync, dict):
+        lines.append("Claim sync: " + ("ok" if sync.get("ok") else "degraded"))
     mode = model.get("mode")
     if mode is not None:
         text = {"control": "Mode: hands control", "watcher": "Mode: watcher",

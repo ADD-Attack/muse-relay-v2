@@ -91,7 +91,7 @@ class ClaimSync:
         self.accepted_seq = seq
         self.pairing = pairing
         self.identity = identity
-        _apply(resting, held, deadline, seq, now)
+        _apply(resting, held, deadline, seq, now, message.get("claim_id"))
         return {"applied": True}
 
     def _load(self):
@@ -156,13 +156,17 @@ def _shaped(message):
     return True
 
 
-def _apply(resting, held, deadline, seq, now):
+def _apply(resting, held, deadline, seq, now, claim_id):
     with resting._lock:
         was_held = resting.claim_held(now)
+        previous = getattr(resting, "claim_id", None)
+        same_claim = isinstance(claim_id, str) and claim_id != "" and claim_id == previous
         resting.claim_seq = seq
+        resting.claim_id = claim_id
         if held and deadline is not None and deadline > now:
             resting.claim_until = deadline
-            if not was_held:
+            # A gap in the same claim must not restart the ramp or clear an owner stop.
+            if not was_held and not same_claim:
                 resting.last_act_end = now
                 resting.owner_stopped = False
         else:

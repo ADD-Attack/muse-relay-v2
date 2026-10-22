@@ -2078,7 +2078,9 @@ class _RestingHand:
                 current = _owner_input_snapshot()
                 owner_changed = (initial_owner is not None and isinstance(current, tuple)
                                  and current[0] != initial_owner)
-                if (owner_changed or _probe_locked() is True
+                permit_lost = self.claim_until is not None and not self.claim_held(self._clock())
+                if (permit_lost
+                        or owner_changed or _probe_locked() is True
                         or owner_coverage() == "degraded"
                         or abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1):
                     fought = True
@@ -2167,7 +2169,15 @@ def resting_claim():
             return jsonify({"ok": False, "error": "claim sync message is invalid"}), 400
         if result.get("applied") and d.get("held") is True:
             start_resting_hand()
-        body = {"ok": True, "applied": bool(result.get("applied")), **_resting.status()}
+        body = {
+            "ok": True,
+            "applied": bool(result.get("applied")),
+            "boot": d.get("boot"),
+            "epoch": d.get("epoch"),
+            "seq": d.get("seq"),
+            "claim_id": d.get("claim_id"),
+            **_resting.status(),
+        }
         if _claim_sync.sync_error:
             body["sync_error"] = _claim_sync.sync_error
         return body

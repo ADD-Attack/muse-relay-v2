@@ -265,3 +265,15 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_claim_sync.py`: 6 passed.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 362 passed, 1 skipped.
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p09`: 1 passed, 20 deselected.
+
+
+## B14 — coalesced claim reconciliation
+
+One worker sends the latest claim snapshot. A failed or rejected acknowledgement retries that snapshot with a new sequence and a new challenge. Backoff caps at `SYNC_RETRY_MAX_S` (0.5 s). `/v1/info` carries `claim_sync`, and the dashboard diagnostics line says whether sync is ok or degraded. Binding authority with no live claim pushes an explicit release.
+
+A refresh of the same `claim_id` after the permit lapses does not move `last_act_end` and does not clear `owner_stopped`. A permit that was set and has expired stops the next resting sub-step. A direct glide with no permit is unchanged.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_reconcile.py`: 5 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 367 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p09`: 1 passed, 20 deselected (with the B13 setup).
