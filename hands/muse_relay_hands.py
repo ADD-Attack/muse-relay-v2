@@ -1808,9 +1808,14 @@ class _RestingHand:
             start = tuple(pyautogui.position())
             steps = motion.plan_rest_path(start[0], start[1], target[0], target[1], self.rng)
             expect = start
+            initial = _owner_input_snapshot()
+            initial_owner = initial[0] if isinstance(initial, tuple) else None
             for sx, sy, delay in steps:
                 px, py = pyautogui.position()
-                if abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1:
+                current = _owner_input_snapshot()
+                owner_changed = (initial_owner is not None and isinstance(current, tuple)
+                                 and current[0] != initial_owner)
+                if owner_changed or abs(px - expect[0]) > 1 or abs(py - expect[1]) > 1:
                     fought = True
                     break
                 _inject(pyautogui.moveTo, sx, sy, duration=0)

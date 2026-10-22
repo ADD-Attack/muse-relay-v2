@@ -134,3 +134,12 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 334 passed, 1 skipped.
 
 P06 is covered by `test_p06_locked_without_target_is_terminal`. Windows packaged focus races remain unverified.
+
+
+## B09 — partial: owner counter at resting-glide boundaries
+
+`_RestingHand._move` samples `_owner_input_snapshot` before every sub-step. A changed owner-event count stops before the next pointer move, even when the pointer is still where the glide expects it. A missing snapshot does not invent owner activity. This does not yet disable resting motion on hook death or cover every non-rest route; those remain the rest of B09/B10/B11.
+
+Commands:
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p11`: 2 passed, 19 deselected.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r11_resting_watch.py tests/test_r12_rest_float.py`: 40 passed.
