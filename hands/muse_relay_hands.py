@@ -512,7 +512,8 @@ def _execution_check(metadata, op, payload, *, start=False):
 @app.get("/execution/capabilities")
 def execution_capabilities():
     return jsonify({"ok": True, "execution_lease_version": _EXECUTION_VERSION,
-                    "boot": _EXECUTION_BOOT, "max_hold_seconds": 120})
+                    "boot": _EXECUTION_BOOT, "max_hold_seconds": 120,
+                    "foreground_hwnd": (_foreground_window() or {}).get("_hwnd")})
 
 
 @app.post("/execution/lease")

@@ -63,3 +63,15 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 299 passed, 1 skipped.
 
 Fixtures cover independent receiver clock, wall-time jumps, adversarial transit delay/equality expiry, wrong boot/token/operation, invalid lifetimes, authenticated minting, and a two-thread atomic-start race. Old-hands gateway refusal is tested with B05, where capability negotiation is wired. No packaged runtime claim.
+
+## B05 — gateway lease negotiation and atomic retry reservation
+
+Gateway `_prepare_queued_execution` negotiates authenticated version/boot, pins available foreground before digest minting, and fails closed without input on incompatible hands. `_queued_attempt` uses a context-local lease carrier so private metadata is not added to payload-key diagnostics; `_forward_act` sends it only on the wire. A hold retains one lease. Caller internal execution fields are stripped. `_pump_receipt` checks immutable monotonic expiry before dispatch, reserves one attempt under the receipt lock, performs I/O unlocked, and samples elapsed time on settlement. Concurrent eviction leaves uncertainty, not false never-started evidence.
+
+Protocol adapter: the fixture in `tests/test_relay_fix_acceptance.py` now supplies a successful fake `_prepare_queued_execution` result so P02/P03 still inject lost/malformed **action** responses, after the new prerequisite handshake. No stimulus or expected outcome was changed. This follows the framework's explicit new-seam adapter allowance; it is not a further legacy expectation supersession. Real handshake behavior has separate B05 tests.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_gateway_leases.py tests/test_relay_fix_acceptance.py -k 'not p06 and not p07 and not p08 and not p09 and not p10 and not p11 and not p12 and not p13'`: 16 passed, 12 deselected.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 306 passed, 1 skipped.
+
+Tests cover old/incompatible hands (zero POSTs), same lease through yields, one concurrent dispatch, eviction during dispatch, and a slow first receipt expiring the second. Receipt-only helper fixtures without monotonic metadata use supplied time plus measured monotonic elapsed duration; actual queued receipts always carry receiver-independent local monotonic deadlines. First-effect enforcement remains B07.

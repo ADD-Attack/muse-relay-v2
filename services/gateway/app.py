@@ -23,6 +23,8 @@ into the gateway's environment). Agent calls are translated:
 """
 
 import base64
+import contextvars
+import math
 import binascii
 import hashlib
 import hmac
@@ -1111,7 +1113,10 @@ def _store_receipt(receipt, payload=None):
             # Mark it BEFORE dropping it: the retry loop may already hold
             # a reference to this dict, and _pump_receipt only forwards
             # receipts whose state is still "held".
-            if evicted["state"] == "held":
+            evicted["_evicted"] = True
+            if evicted.get("_dispatching") or evicted["state"] == "in-flight":
+                evicted["state"] = "unknown-outcome"
+            elif evicted["state"] == "held":
                 evicted["state"] = "expired"
             _pending_payloads.pop(victim, None)
 
@@ -1186,6 +1191,9 @@ def classify_act_outcome(status, result):
         safe["ok"] = True
         return "applied", status, safe
     code = result.get("error_code")
+    if code == "deadline_expired":
+        safe["error_code"] = code
+        return "refused-yielded", status, safe
     if code in {"yield", "locked"} and status == 409:
         if result.get("aborted") or result.get("abort_reason") or counts.get("chars_typed", 0):
             return unknown
@@ -1196,7 +1204,7 @@ def classify_act_outcome(status, result):
             return "aborted-owner", status, safe
         if reason in {"locked", "foreground_changed"}:
             return "aborted", status, safe
-    if code in {"operation_failed", "configuration_error", "invalid_operation"}:
+    if code in {"operation_failed", "configuration_error", "invalid_operation", "capability_refused", "deadline_expired"}:
         safe["error_code"] = code
     return "failed", status, safe
 
@@ -1220,7 +1228,7 @@ def _pump_receipt(receipt, now):
     deadline settles it as refused-yielded, otherwise it stays held.
     """
     with _receipts_lock:
-        if receipt.get("state") != "held":
+        if receipt.get("state") != "held" or receipt.get("_dispatching"):
             return receipt
         if receipt["id"] not in _pending_payloads:
             # The payload is gone (evicted or settled elsewhere). NEVER
@@ -1230,17 +1238,38 @@ def _pump_receipt(receipt, now):
             receipt["state"] = "expired"
             receipt["updated_at"] = now
             return receipt
+        deadline = receipt.get("_deadline_mono", receipt.get("deadline"))
+        current = time.monotonic() if "_deadline_mono" in receipt else now
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or current >= deadline):
+            receipt.update(state="refused-yielded", updated_at=time.time(),
+                           result={"ok": False, "error_code": "deadline_expired"})
+            _pending_payloads.pop(receipt["id"], None)
+            return receipt
+        receipt["_dispatching"] = True
         payload = dict(_pending_payloads[receipt["id"]])
         op = receipt["op"]
-    state, status, result, _ = _attempt_act(op, payload)
+        context = receipt.get("_lease_context")
+    attempt_started = time.monotonic()
+    state, status, result, _ = _queued_attempt(op, payload, context)
     yielded = state == "held"
     with _receipts_lock:
-        receipt["updated_at"] = now
+        receipt["_dispatching"] = False
+        # Eviction cannot turn an outstanding dispatch into never-started expiry.
+        if receipt.get("_evicted"):
+            receipt["state"] = "unknown-outcome"
+            receipt["result"] = {"ok": False, "error_code": "unknown_outcome"}
+            _pending_payloads.pop(receipt["id"], None)
+            return receipt
+        receipt["updated_at"] = time.time()
         if status is not None:
             receipt["hands_status"] = status
         if yielded:
-            if now >= receipt["deadline"]:
+            current = (time.monotonic() if "_deadline_mono" in receipt
+                       else now + (time.monotonic() - attempt_started))
+            if current >= deadline:
                 receipt["state"] = "refused-yielded"
+                receipt["result"] = {"ok": False, "error_code": "deadline_expired"}
                 _pending_payloads.pop(receipt["id"], None)
             return receipt
         if state != "applied":
@@ -1278,6 +1307,48 @@ def _ensure_receipt_thread():
         _receipt_thread.start()
 
 
+_execution_context = contextvars.ContextVar("execution_context", default=None)
+
+
+def _prepare_queued_execution(op, payload, hold):
+    """Negotiate before any protected action; failure never dispatches input."""
+    try:
+        response = requests.get(f"{HANDS_URL}/execution/capabilities",
+                                headers=_hands_headers(), timeout=HANDS_TIMEOUT)
+        caps = response.json()
+        if (response.status_code != 200 or not isinstance(caps, dict)
+                or caps.get("ok") is not True
+                or type(caps.get("execution_lease_version")) is not int
+                or caps["execution_lease_version"] != 1
+                or not isinstance(caps.get("boot"), str) or not caps["boot"]):
+            return None
+        # Pin before minting: the digest cannot change on a later retry.
+        hwnd = caps.get("foreground_hwnd")
+        if "expect_focus" not in payload and op != "focus" and type(hwnd) is int and hwnd > 0:
+            payload["expect_focus"] = {"hwnd": hwnd}
+        response = requests.post(f"{HANDS_URL}/execution/lease",
+            headers=_hands_headers(), timeout=HANDS_TIMEOUT,
+            json={"op": op, "payload": payload, "hold_seconds": hold})
+        body = response.json()
+        lease = body.get("lease") if isinstance(body, dict) else None
+        if (response.status_code != 200 or body.get("ok") is not True
+                or not isinstance(lease, dict) or type(lease.get("version")) is not int
+                or lease["version"] != 1 or lease.get("boot") != caps["boot"]
+                or not isinstance(lease.get("token"), str) or not lease["token"]):
+            return None
+        return {k: lease[k] for k in ("version", "boot", "token")}
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _queued_attempt(op, payload, context):
+    token = _execution_context.set(context)
+    try:
+        return _attempt_act(op, payload)
+    finally:
+        _execution_context.reset(token)
+
+
 def _forward_act(op, payload):
     """Forward one act to the hands. Returns (status_code, json_dict).
 
@@ -1289,10 +1360,18 @@ def _forward_act(op, payload):
     if op not in HANDS_OPS:
         return 400, {"ok": False, "error_code": "invalid_operation"}
     path = HANDS_OP_PATHS.get(op, op)
+    context = _execution_context.get()
+    wire_payload = dict(payload)
+    if context is not None:
+        if context.get("lease") is None:
+            context["lease"] = _prepare_queued_execution(op, payload, context["hold"])
+            if context["lease"] is None:
+                return 409, {"ok": False, "error_code": "capability_refused"}
+        wire_payload = {**payload, "_execution_lease": context["lease"]}
     try:
         r = requests.post(
             f"{HANDS_URL}/{path}",
-            json=payload,
+            json=wire_payload,
             headers=_hands_headers(),
             timeout=_act_timeout(op, payload),
         )
@@ -1383,7 +1462,7 @@ def act():
     """
     body = request.get_json(force=True, silent=True) or {}
     op = body.get("op") or ""
-    payload = {k: v for k, v in body.items() if k != "op"}
+    payload = {k: v for k, v in body.items() if k != "op" and not k.startswith("_execution")}
     _, status, result, _ = _attempt_act(op, payload)
     return jsonify(result), status
 
@@ -1405,13 +1484,14 @@ def act_queued():
     body = request.get_json(force=True, silent=True) or {}
     op = body.get("op") or ""
     hold = _clamp_number(body.get("hold_seconds", HOLD_DEFAULT), HOLD_DEFAULT, HOLD_MIN, HOLD_MAX)
-    payload = {k: v for k, v in body.items() if k not in ("op", "hold_seconds")}
+    payload = {k: v for k, v in body.items() if k not in ("op", "hold_seconds") and not k.startswith("_execution")}
     submitted = time.time()
     receipt = {"id": uuid.uuid4().hex, "op": op, "param_keys": sorted(payload),
                "state": "in-flight", "submitted_at": submitted,
                "updated_at": submitted, "deadline": submitted, "result": None}
     _store_receipt(receipt)
-    state, status, safe, result = _attempt_act(op, payload)
+    context = {"hold": hold, "lease": None}
+    state, status, safe, result = _queued_attempt(op, payload, context)
     if state != "held":
         # R4 (F4): settle a receipt for the direct result too — no
         # payload is retained (nothing is held), and the id rides in
@@ -1463,6 +1543,8 @@ def act_queued():
         "submitted_at": now,
         "updated_at": now,
         "deadline": now + hold,
+        "_deadline_mono": time.monotonic() + hold,
+        "_lease_context": context,
         "hold_seconds": hold,
         "hands_status": status,
         "result": None,

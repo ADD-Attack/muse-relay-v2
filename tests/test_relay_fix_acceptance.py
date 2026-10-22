@@ -72,6 +72,10 @@ def gateway(monkeypatch, clock):
     module.HANDS_SECRET = "acceptance-secret"
     monkeypatch.setattr(module, "time", clock)
     monkeypatch.setattr(module, "_ensure_receipt_thread", lambda: None)
+    # R13 protocol adapter: P02/P03 inject faults at the action POST,
+    # after successful lease negotiation (covered separately in B05).
+    monkeypatch.setattr(module, "_prepare_queued_execution",
+                        lambda *a: {"version": 1, "boot": "fixture", "token": "fixture"})
     module._reset_coordination_state()
     return module
 
