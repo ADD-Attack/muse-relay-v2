@@ -1154,6 +1154,57 @@ def _held_failure_diagnostics(result):
     return safe
 
 
+def classify_act_outcome(status, result):
+    """Classify injection evidence, never application success or transport guesses.
+
+    Return (state, HTTP status, copied privacy-safe evidence). Bare boolean
+    ok is the existing hands completion contract; contradictory evidence
+    invalidates it. Only coded, zero-effect refusals may be retried.
+    """
+    unknown = ("unknown-outcome", 502,
+               {"ok": False, "error_code": "unknown_outcome"})
+    if (not isinstance(result, dict) or type(result.get("ok")) is not bool
+            or type(status) is not int):
+        return unknown
+    if result.get("error_code") == "unknown_outcome":
+        return unknown
+    counts = {}
+    for key in ("chars", "chars_typed"):
+        if key in result:
+            v = result[key]
+            if type(v) is not int or not 0 <= v <= 1_000_000:
+                return unknown
+            counts[key] = v
+    if (len(counts) == 2 and counts["chars_typed"] > counts["chars"]):
+        return unknown
+    safe = _held_failure_diagnostics(result)
+    if result["ok"]:
+        if (not 200 <= status < 300 or result.get("aborted")
+                or result.get("error_code") or result.get("abort_reason")
+                or (len(counts) == 2 and counts["chars_typed"] != counts["chars"])):
+            return unknown
+        safe["ok"] = True
+        return "applied", status, safe
+    code = result.get("error_code")
+    if code in {"yield", "locked"} and status == 409:
+        if result.get("aborted") or result.get("abort_reason") or counts.get("chars_typed", 0):
+            return unknown
+        return "held", status, safe
+    if code in {"operation_failed", "configuration_error", "invalid_operation"}:
+        safe["error_code"] = code
+    return "failed", status, safe
+
+
+def _attempt_act(op, payload):
+    # An arbitrary forwarding exception cannot prove non-dispatch.
+    try:
+        status, result = _forward_act(op, payload)
+    except Exception:
+        status, result = 502, {"ok": False, "error_code": "unknown_outcome"}
+    state, status, safe = classify_act_outcome(status, result)
+    return state, status, safe, result
+
+
 def _pump_receipt(receipt, now):
     """One retry step for a held receipt. Returns the receipt.
 
@@ -1175,17 +1226,8 @@ def _pump_receipt(receipt, now):
             return receipt
         payload = dict(_pending_payloads[receipt["id"]])
         op = receipt["op"]
-    try:
-        status, result = _forward_act(op, payload)
-    except Exception as exc:  # a stubbed / broken forward must not kill the pump
-        status, result = None, {"ok": False, "error": f"forward failed: {exc}"}
-        failed = True
-        yielded = False
-    else:
-        yielded = _is_yield_conflict(status, result)
-        # 2xx applied. Yield-409 stays held (deadline still -> refused-yielded).
-        # Everything else, including 400/500/503/502 and a non-yield 409, fails.
-        failed = not (isinstance(status, int) and 200 <= status < 300)
+    state, status, result, _ = _attempt_act(op, payload)
+    yielded = state == "held"
     with _receipts_lock:
         receipt["updated_at"] = now
         if status is not None:
@@ -1195,9 +1237,9 @@ def _pump_receipt(receipt, now):
                 receipt["state"] = "refused-yielded"
                 _pending_payloads.pop(receipt["id"], None)
             return receipt
-        if failed or status is None:
-            receipt["state"] = "failed"
-            receipt["result"] = _held_failure_diagnostics(result)
+        if state != "applied":
+            receipt["state"] = state
+            receipt["result"] = result
             _pending_payloads.pop(receipt["id"], None)
             return receipt
         receipt["state"] = "applied"
@@ -1237,9 +1279,9 @@ def _forward_act(op, payload):
     so /v1/act/queued (and its retry pump) share the one code path.
     """
     if not HANDS_SECRET:
-        return 503, {"ok": False, "error": "HANDS_SECRET not configured on gateway"}
+        return 503, {"ok": False, "error_code": "configuration_error"}
     if op not in HANDS_OPS:
-        return 400, {"ok": False, "error": f"unknown op: {op!r}"}
+        return 400, {"ok": False, "error_code": "invalid_operation"}
     path = HANDS_OP_PATHS.get(op, op)
     try:
         r = requests.post(
@@ -1248,8 +1290,8 @@ def _forward_act(op, payload):
             headers=_hands_headers(),
             timeout=_act_timeout(op, payload),
         )
-    except requests.RequestException as exc:
-        return 502, {"ok": False, "error": f"hands unreachable: {exc}"}
+    except requests.RequestException:
+        return 502, {"ok": False, "error_code": "unknown_outcome"}
     if r.status_code == 401:
         return 502, {
             "ok": False,
@@ -1258,7 +1300,7 @@ def _forward_act(op, payload):
     try:
         return r.status_code, r.json()
     except ValueError:
-        return r.status_code, {"ok": r.ok, "status": r.status_code}
+        return 502, {"ok": False, "error_code": "unknown_outcome"}
 def _act_timeout(op, payload):
     """Per-op timeout for the hands call (wishlist #9).
 
@@ -1336,7 +1378,7 @@ def act():
     body = request.get_json(force=True, silent=True) or {}
     op = body.get("op") or ""
     payload = {k: v for k, v in body.items() if k != "op"}
-    status, result = _forward_act(op, payload)
+    _, status, result, _ = _attempt_act(op, payload)
     return jsonify(result), status
 
 
@@ -1358,18 +1400,23 @@ def act_queued():
     op = body.get("op") or ""
     hold = _clamp_number(body.get("hold_seconds", HOLD_DEFAULT), HOLD_DEFAULT, HOLD_MIN, HOLD_MAX)
     payload = {k: v for k, v in body.items() if k not in ("op", "hold_seconds")}
-    status, result = _forward_act(op, payload)
-    if not _is_yield_conflict(status, result):
+    submitted = time.time()
+    receipt = {"id": uuid.uuid4().hex, "op": op, "param_keys": sorted(payload),
+               "state": "in-flight", "submitted_at": submitted,
+               "updated_at": submitted, "deadline": submitted, "result": None}
+    _store_receipt(receipt)
+    state, status, safe, result = _attempt_act(op, payload)
+    if state != "held":
         # R4 (F4): settle a receipt for the direct result too — no
         # payload is retained (nothing is held), and the id rides in
         # the response body so the caller can reconcile later.
         now = time.time()
-        applied = isinstance(status, int) and 200 <= status < 300
-        receipt = {
-            "id": uuid.uuid4().hex,
+        applied = state == "applied"
+        receipt.update({
+            "id": receipt["id"],
             "op": op,
             "param_keys": sorted(payload.keys()),
-            "state": "applied" if applied else "failed",
+            "state": state,
             # R9 (#21): which path settled it — "direct" here,
             # "after-hold" when the retry pump applies a held act.
             "applied_via": "direct" if applied else None,
@@ -1378,14 +1425,10 @@ def act_queued():
             "deadline": now,
             "hold_seconds": hold,
             "hands_status": status,
-            "result": result,
-        }
+            "result": safe,
+        })
         _store_receipt(receipt)
-        body = (
-            dict(result)
-            if isinstance(result, dict)
-            else {"ok": False, "error": str(result)}
-        )
+        body = dict(safe)
         body["id"] = receipt["id"]
         return jsonify(body), status
     now = time.time()
@@ -1405,8 +1448,8 @@ def act_queued():
     ):
         pinned = result["foreground_hwnd"]
         payload["expect_focus"] = {"hwnd": pinned}
-    receipt = {
-        "id": uuid.uuid4().hex,
+    receipt.update({
+        "id": receipt["id"],
         "op": op,
         "param_keys": sorted(k for k in payload.keys() if not (pinned is not None and k == "expect_focus")),
         "pinned_foreground": pinned is not None,
@@ -1417,7 +1460,7 @@ def act_queued():
         "hold_seconds": hold,
         "hands_status": status,
         "result": None,
-    }
+    })
     _store_receipt(receipt, payload)
     _ensure_receipt_thread()
     return (
