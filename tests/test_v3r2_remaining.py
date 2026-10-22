@@ -202,13 +202,13 @@ def test_pump_maps_2xx_yield_and_everything_else(gateway):
     applied = _receipt(gateway, now, 200, {"ok": True})
     assert applied["state"] == "applied"
     held = _receipt(gateway, now, 409, {"error": "user active — control yielded"})
-    assert held["state"] == "held"
-    assert "r1" in gateway._pending_payloads or held["state"] == "held"
+    assert held["state"] == "unknown-outcome"
+    assert "r1" not in gateway._pending_payloads
     for status in (400, 500, 503, 502):
         failed = _receipt(gateway, now, status, {"ok": False, "error": "hands unreachable: x"})
         assert failed["state"] == "failed"
     other = _receipt(gateway, now, 409, {"error": "offset mismatch"})
-    assert other["state"] == "failed"
+    assert other["state"] == "unknown-outcome"
 
 
 def test_release_expired_claim_includes_reserved_for(gateway, monkeypatch):

@@ -35,3 +35,11 @@ Commands:
 The old test is unchanged. Preserving its behavior would violate the R13 acceptance specification; changing its expectations is prohibited by the operator's no-adjusting-expected-outputs boundary. Owner resolution of this contract conflict is required. No fixture sniffing, legacy-only bypass, xfail, or skips were introduced to hide it. B02 remains gate-blocked; B03–B18 have not been started, respecting the sequential package/review requirement. This checkpoint is NOT a completed R13 candidate.
 
 Unresolved: whether the operator authorizes an explicit, reviewed retirement/update of this superseded R12 behavior contract. No production or packaged Windows validation was attempted.
+
+### B02 supersession authorized and gate cleared
+
+Muse's explicit operator authorization resolves the conflict in favor of F3. In `tests/test_v3r2_remaining.py::test_pump_maps_2xx_yield_and_everything_else`, lines 205–206 and 211 only: malformed no-`ok` yield evidence now asserts `unknown-outcome` and no pending payload (previously `held` and retained payload); malformed offset-mismatch evidence now asserts `unknown-outcome` (previously `failed`). Stimuli and every other assertion in that file are unchanged. Authority: framework F3, Required behavior, and operator's specific supersession order. This is not authorization to change further legacy expectations.
+
+Rerun commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 284 passed, 1 skipped.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p02 or p03 or p04 or p05'`: 8 passed, 13 deselected.
