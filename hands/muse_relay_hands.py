@@ -98,7 +98,7 @@ import urllib.request
 import uuid
 
 import pyautogui
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, has_request_context
 
 PORT = 5000
 
@@ -747,21 +747,60 @@ _INPUT = motion.InputMutex(clock=lambda: time.monotonic(), sleep=lambda s: time.
 _LEDGER = motion.SelfInputLedger()
 
 
+class _InputRefused(Exception):
+    def __init__(self, response):
+        self.response = response
+
+
+@app.errorhandler(_InputRefused)
+def _input_refused(error):
+    return error.response
+
+
+_guard_local = threading.local()
+
+
 class _input:
-    """with _input("mouse"|"keys"): hold the input mutex for one op."""
+    """Serialize, then revalidate under input access; failed enter releases."""
 
     def __init__(self, kind):
         self.kind = kind
+        self.started = False
+
+    def check(self):
+        if not has_request_context():
+            return
+        refused = _yield_if_active()
+        if refused is None:
+            refused = _focus_guard()
+        if refused is not None:
+            raise _InputRefused(refused)
+        body = request.get_json(silent=True) or {}
+        if "_execution_lease" in body:
+            op = "clipboard_set" if request.path == "/clipboard/set" else request.path.lstrip("/")
+            code = _execution_check(body["_execution_lease"], op, body)
+            if code:
+                raise _InputRefused((jsonify({"ok": False, "error_code": code}), 409))
 
     def __enter__(self):
         _INPUT.acquire(self.kind, random)
-        _resting.act_begin()
-        return self
+        try:
+            self.check()
+            _guard_local.current = self
+            _resting.act_begin()
+            self.started = True
+            return self
+        except BaseException:
+            _INPUT.release(self.kind)
+            raise
 
     def __exit__(self, *exc):
-        # R11: every real agent act resets the resting-hand ramp to zero.
-        _resting.act_end(time.monotonic())
-        _INPUT.release(self.kind)
+        try:
+            if self.started:
+                _resting.act_end(time.monotonic())
+        finally:
+            _guard_local.current = None
+            _INPUT.release(self.kind)
         return False
 
 
@@ -2326,23 +2365,24 @@ def focus():
     refused = _yield_if_active()
     if refused is not None:
         return refused
-    for win in _enum_windows():
-        candidate = (win.get("title") or "").casefold()
-        matched = candidate == needle if exact else needle in candidate
-        if matched:
-            if not _activate_window(win):
-                return (
-                    jsonify(
-                        {
-                            "ok": False,
-                            "error": "activation failed",
-                            "window": _shape_window(win),
-                        }
-                    ),
-                    409,
-                )
-            return jsonify({"ok": True, "window": _shape_window(win)})
-    return jsonify({"ok": False, "error": f"no window matching {title!r}"}), 404
+    with _input("keys"):
+        for win in _enum_windows():
+            candidate = (win.get("title") or "").casefold()
+            matched = candidate == needle if exact else needle in candidate
+            if matched:
+                if not _activate_window(win):
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "error": "activation failed",
+                                "window": _shape_window(win),
+                            }
+                        ),
+                        409,
+                    )
+                return jsonify({"ok": True, "window": _shape_window(win)})
+        return jsonify({"ok": False, "error": f"no window matching {title!r}"}), 404
 
 
 # ---------------------------------------------- V3-P4: clipboard (#6)
@@ -2460,11 +2500,13 @@ def clipboard_set():
     backend = _clipboard_backend()
     if backend is None:
         return jsonify({"ok": False, "error": "clipboard unavailable on this host"}), 501
-    try:
-        backend.set_text(text)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"clipboard set failed: {exc}"}), 502
-    return {"ok": True}
+    with _input("keys"):
+        try:
+            backend.set_text(text)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"clipboard set failed: {exc}"}), 502
+        return {"ok": True}
+
 
 
 @app.get("/clipboard/get")

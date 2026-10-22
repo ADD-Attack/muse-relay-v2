@@ -75,3 +75,19 @@ Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 306 passed, 1 skipped.
 
 Tests cover old/incompatible hands (zero POSTs), same lease through yields, one concurrent dispatch, eviction during dispatch, and a slow first receipt expiring the second. Receipt-only helper fixtures without monotonic metadata use supplied time plus measured monotonic elapsed duration; actual queued receipts always carry receiver-independent local monotonic deadlines. First-effect enforcement remains B07.
+
+## B06 — guarded input checkpoint; review gate BLOCKED
+
+`_input.check` revalidates owner activity, desktop lock, expected foreground and lease after mutex acquisition/hand-travel. Failed `__enter__` releases on every exception, and never resets resting state. `_InputRefused` has a Flask handler. Focus and clipboard-set now use the shared mutex. First-effect/after-preparatory-wait consumption and multistep guards remain B07/B11 work; this checkpoint does not claim them complete.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k p07`: 3 passed, 18 deselected.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_input.py tests/test_relay_fix_acceptance.py -k 'lock_change or p07'`: 13 passed, 18 deselected. Includes all ten side-effect routes, no input/ramp reset on post-acquisition lock change, and lock acquisition by a different thread after refusal.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: **1 failed, 315 passed, 1 skipped**.
+- `git diff --check`: clean.
+
+### Further named conflict — R7.2 single-door idle-probe expectation
+
+`tests/test_r72_fixround.py::test_lock_check_is_lock_only_not_self_triggering_idle` is unchanged. At lines 269–271 its fake reports `(None, None)` on the first probe and `(False, 0.0)` on every subsequent probe, even before any key has been injected. Lines 287–288 require complete successful typing and exactly ONE idle probe (`calls["n"] == 1`). F2 requires a new owner/lock check under input access after acquisition, before any side effect. That second check therefore sees newly reported activity and correctly refuses; bypassing it would regress P07.
+
+This is distinct from self-triggered idle *after* injection, which must continue to be ignored/attributed correctly. Proposed narrow resolution for operator review: keep the successful full-text assertion, change the fixture to report zero idle only once `s.written` is nonempty (actual simulated self input), and replace the single-probe assertion with evidence of the required pre-input revalidation. This preserves the original anti-self-trigger purpose without prohibiting F2. No changes to this test, its expectations, or other legacy expected outputs have been made. B07 onward is not started pending this gate, per the one-conflict-at-a-time operator direction.
