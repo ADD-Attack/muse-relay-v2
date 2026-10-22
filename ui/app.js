@@ -19,10 +19,14 @@
   const STATE_CHIP = {
     applied: "chip-ok", held: "chip-held", "refused-yielded": "chip-bad",
     failed: "chip-bad", expired: "chip-quiet",
+    "unknown-outcome": "chip-held", "aborted-owner": "chip-bad",
+    aborted: "chip-bad", unavailable: "chip-quiet", "in-flight": "chip-info",
   };
   const STATE_COLOR = {
     applied: "#3ddc97", held: "#ffb547", "refused-yielded": "#ff7a59",
     failed: "#ff5c6c", expired: "#5b6376",
+    "unknown-outcome": "#ffb547", "aborted-owner": "#ff7a59",
+    aborted: "#ff5c6c", unavailable: "#5b6376", "in-flight": "#7a8cff",
   };
 
   let logSeq = 0;

@@ -1131,7 +1131,7 @@ def _held_failure_diagnostics(result):
     safe = {"ok": False}
     enums = {
         "error_code": {"type_aborted", "foreground_changed", "locked", "yield"},
-        "abort_reason": {"owner", "locked"},
+        "abort_reason": {"owner", "locked", "foreground_changed"},
         "owner_guard": {"hook", "dwtime", "none", None},
         "method_used": {"keys", "paste"},
     }
@@ -1190,6 +1190,12 @@ def classify_act_outcome(status, result):
         if result.get("aborted") or result.get("abort_reason") or counts.get("chars_typed", 0):
             return unknown
         return "held", status, safe
+    if result.get("aborted") is True:
+        reason = result.get("abort_reason")
+        if reason == "owner" and "chars_typed" in counts:
+            return "aborted-owner", status, safe
+        if reason in {"locked", "foreground_changed"}:
+            return "aborted", status, safe
     if code in {"operation_failed", "configuration_error", "invalid_operation"}:
         safe["error_code"] = code
     return "failed", status, safe
@@ -1493,8 +1499,8 @@ def act_queued_get(receipt_id):
                 jsonify(
                     {
                         "ok": False,
-                        "error": "unknown or expired receipt id",
-                        "state": "expired",
+                        "error": "receipt unavailable; execution cannot be inferred",
+                        "state": "unavailable",
                     }
                 ),
                 404,

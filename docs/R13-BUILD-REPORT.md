@@ -43,3 +43,13 @@ Muse's explicit operator authorization resolves the conflict in favor of F3. In 
 Rerun commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 284 passed, 1 skipped.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p02 or p03 or p04 or p05'`: 8 passed, 13 deselected.
+
+## B03 — receipt states and visibility
+
+Added schema-valid `aborted-owner` / `aborted` classification; missing receipt lookup now says `unavailable`, never nonexecution. UI state chips/colors explicitly represent unknown, abort, in-flight and unavailable. README documents injection-vs-effect, no replay, and volatile retention. Existing dashboard snapshot/count/feed functions preserve arbitrary state strings without remapping; new tests exercise those actual functions, polling/list endpoints and eviction. Browser interaction remains unverified; source feed has no replay control.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 288 passed, 1 skipped.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p02 or p03 or p04 or p05'`: 8 passed, 13 deselected.
+
+No further pre-existing test expectations changed. Source map: gateway `classify_act_outcome`, `act_queued_get`; UI `STATE_CHIP`, `STATE_COLOR`; existing model `_snapshot_receipt_rows`, `summarize_receipts`, `receipt_state_counts` audited unchanged.
