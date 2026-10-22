@@ -144,13 +144,13 @@ def _run(hands, monkeypatch, session, text=URL40, locked_after=None, mode="hook"
 def test_owner_input_between_injection_and_postwrite_probe_aborts(hands, monkeypatch):
     # Finding 1: the relay event, then a distinct owner event, both
     # before write 18 returns. Provenance says the second is the
-    # owner's; the type stops at the next boundary (24), nothing after.
+    # owner's; the current unit finishes and the next unit is not emitted.
     s = HookSession(owner_in_write=18)
     status, body = _run(hands, monkeypatch, s)
     assert status == 409
     assert body["error_code"] == "type_aborted" and body["abort_reason"] == "owner"
-    assert body["chars_typed"] == 24 and body["owner_guard"] == "hook"
-    assert "".join(s.written) == URL40[:24]
+    assert body["chars_typed"] == 18 and body["owner_guard"] == "hook"
+    assert "".join(s.written) == URL40[:18]
 
 
 def test_type_aborts_on_lock_without_input(hands, monkeypatch):
@@ -159,8 +159,8 @@ def test_type_aborts_on_lock_without_input(hands, monkeypatch):
     status, body = _run(hands, monkeypatch, s, locked_after=18, mode="dwtime")
     assert status == 409
     assert body["abort_reason"] == "locked" and "locked" in body["error"]
-    assert body["chars_typed"] == 24 and len(s.written) == 24
-    assert "".join(s.written) == URL40[:24]
+    assert body["chars_typed"] == 18 and len(s.written) == 18
+    assert "".join(s.written) == URL40[:18]
     assert "yield" not in body["error"]  # never queue-retried (prefix landed)
 
 
@@ -195,7 +195,7 @@ def test_repeated_probe_failures_do_not_self_abort(hands, monkeypatch):
 def test_probe_failure_then_recovery_still_detects_owner(hands, monkeypatch):
     s = DwSession(fail_probe_after_write={5}, owner_on_sleep=18)
     status, body = _run(hands, monkeypatch, s, mode="dwtime")
-    assert status == 409 and body["chars_typed"] == 24
+    assert status == 409 and body["chars_typed"] == 18
 
 
 # ============================================================ Finding 5
@@ -215,7 +215,7 @@ def test_backward_timestamp_is_not_owner_activity(hands, monkeypatch):
 def test_owner_input_past_publish_grace_is_detected(hands, monkeypatch):
     s = DwSession(owner_late_after_write=14)
     status, body = _run(hands, monkeypatch, s, mode="dwtime")
-    assert status == 409 and body["chars_typed"] == 24
+    assert status == 409 and body["chars_typed"] == 14
 
 
 def test_dw_advanced_exact_half_range(hands):
@@ -238,7 +238,7 @@ def test_hook_mode_own_injected_input_never_aborts(hands, monkeypatch):
 def test_hook_mode_owner_on_sleep_18_aborts_at_24(hands, monkeypatch):
     s = HookSession(owner_on_sleep=18)
     status, body = _run(hands, monkeypatch, s)
-    assert status == 409 and body["chars_typed"] == 24
+    assert status == 409 and body["chars_typed"] == 18
 
 
 def test_deaf_hooks_degrade_to_dwtime(hands, monkeypatch):

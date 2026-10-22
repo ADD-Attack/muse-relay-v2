@@ -772,6 +772,22 @@ class _InputRefused(Exception):
         self.response = response
 
 
+class _PasteUnavailable(Exception):
+    """Paste cannot start. A key fallback is still allowed."""
+
+
+class _PasteUncertain(Exception):
+    """The paste chord may have reached the desktop. Do not also type it."""
+
+
+class _PasteAborted(Exception):
+    """Clipboard work stopped before the chord. No key fallback."""
+
+    def __init__(self, body, status=409):
+        self.body = body
+        self.status = status
+
+
 @app.errorhandler(_InputRefused)
 def _input_refused(error):
     return error.response
@@ -970,46 +986,64 @@ def click():
     }
 
 
+def _release_chord(keys):
+    """Required key-up cleanup. Never treated as a new input unit."""
+    for key in keys:
+        try:
+            pyautogui.keyUp(key)
+        except Exception:
+            pass
+
+
+def _owner_attribution_limit():
+    """What this process cannot honestly attribute to the owner."""
+    coverage = owner_coverage()
+    if coverage == "degraded":
+        return "unreliable"
+    if coverage == "hook":
+        return "non-injected-events-only"
+    return "same-tick-and-grace-blind"
+
+
+def _pre_effect_response(kind):
+    if kind == "locked":
+        error, code = "desktop locked — control yielded", "locked"
+    else:
+        error, code = "user active — control yielded", "yield"
+    return jsonify({"ok": False, "error": error, "error_code": code}), 409
+
+
 def _type_dispatch(method, keys_fn, paste_fn, text):
-    """Pick the type path; returns (method_used, note)."""
+    """Pick the type path. Keys fallback only if paste never started."""
     if method == "keys":
         return keys_fn(), None
-    if method == "paste":
+    wants_paste = method == "paste" or (
+        method == "auto" and len(text) > 120 and _clipboard_backend() is not None
+    )
+    if wants_paste:
         try:
             return paste_fn(), None
-        except _InputRefused:
-            raise
-        except Exception as exc:
-            return keys_fn(), f"paste requested but unavailable ({exc}); used keys"
-    if len(text) > 120 and _clipboard_backend() is not None:
-        try:
-            return paste_fn(), None
-        except _InputRefused:
-            raise
-        except Exception as exc:
-            return keys_fn(), f"paste failed ({exc}); used keys"
+        except _PasteUnavailable as exc:
+            return keys_fn(), f"paste unavailable ({exc}); used keys"
     return keys_fn(), None
 
 
 @app.post("/type")
 def type_text():
-    """Type text: clipboard paste for long payloads, jittered keys else.
+    """Type text one character at a time, or paste when that path is safe.
 
     {text, method?: "auto"|"paste"|"keys", jitter?: bool}
 
-    Method (wishlist #9): "auto" pastes when the text is over 120 chars
-    and a clipboard backend exists — the paste path saves the current
-    clipboard and restores it afterwards; "paste" forces that path;
-    "keys" forces keystrokes. Any clipboard failure falls back to
-    keystrokes instead of failing the request (see "note").
+    Jitter changes delays only. Both key modes use the same per-character
+    loop: sample owner, lock, and focus before each character; an owner
+    event during the current character stops the next one. A fixed 0.02 s
+    delay is the non-jitter plan.
 
-    Jitter (wishlist #16): the keystroke path types per character with
-    human-band delays from _plan_key_delays unless jitter is false —
-    false restores the original single _inject(pyautogui.write, interval=0.02).
-
-    Response: {"ok", "method_used", "chars", "elapsed_seconds",
-    "delays_planned", "planned_seconds"} — the delay fields describe the
-    keystroke plan (0 on the paste path).
+    Paste samples before clipboard mutation and again before Ctrl+V.
+    Owner activity before the chord does not paste. The saved clipboard
+    is restored only when it still holds the value this call placed.
+    A chord that may have been sent never falls back to typing, and the
+    response does not invent chars_typed for paste consumption.
     """
     refused = _yield_if_active()
     if refused is not None:
@@ -1022,123 +1056,190 @@ def type_text():
     if method not in ("auto", "paste", "keys"):
         return jsonify({"ok": False, "error": "method must be auto, paste or keys"}), 400
     jitter = bool(d.get("jitter", True))
-    _owner_monitor.ensure_started()  # no-op off Windows / once running
+    _owner_monitor.ensure_started()
     started = time.monotonic()
     note = None
     delays = []
-
     typed = 0
-    state = {"guard": None, "reason": None}
+    state = {"guard": None, "reason": None, "pre_effect": None}
+
+    def _unit_block(guard):
+        """(kind, focus_response) when the next unit must not be emitted."""
+        guard.sample()
+        if guard.owner_seen:
+            return "owner", None
+        if _probe_locked() is True:
+            return "locked", None
+        focus = _focus_guard()
+        if focus is not None:
+            return "foreground_changed", focus
+        return None, None
+
+    def _remember_block(kind, focus):
+        if typed == 0:
+            state["pre_effect"] = focus if focus is not None else _pre_effect_response(
+                "locked" if kind == "locked" else "owner")
+        else:
+            state["reason"] = kind
 
     def _keys():
         nonlocal delays, typed
-        if jitter:
-            delays = _plan_key_delays(text, random)
-            # R4 (F7) re-checked the yield every 12 chars so a long
-            # type gated only at the door cannot interleave relay
-            # keystrokes with the owner's for the op's whole duration.
-            # R7.2 (wishlist #27): that re-check consulted
-            # _yield_if_active(), whose idle probe counts this type's
-            # OWN injected keystrokes as session input — after 12 of
-            # our own chars the idle read ~0 and the type aborted on
-            # itself, owner or no owner. Track dwTime instead: sample
-            # it after each keystroke (that stamp is ours by
-            # construction) and flag owner input when a later sample
-            # is strictly newer than the stamp our last keystroke
-            # explains. The abort still lands on the same 12-char
-            # boundaries and reports the same partial, so the response
-            # contract is unchanged. Accepted blind spot: an owner
-            # event inside the same tick as one of our keystrokes is
-            # indistinguishable from that keystroke. Off Windows / on
-            # probe failure dwTime is None and the re-check is inert,
-            # like the door's.
-            guard = _TypeOwnerGuard()
-            state["guard"] = guard.mode
-            for ch, delay in zip(text, delays):
-                # R7.2 fix (Finding 3): sample FIRST, so owner input
-                # during the sleep after char 12 stops char 13.
-                guard.sample()
-                if typed and typed % 12 == 0:
-                    if guard.owner_seen:
-                        state["reason"] = "owner"
-                        break
-                    # Finding 2: a lock with no new input moves no
-                    # timestamp — check the lock itself, lock-only.
-                    if _probe_locked() is True:
-                        state["reason"] = "locked"
-                        break
+        delays = _plan_key_delays(text, random) if jitter else [0.02] * len(text)
+        guard = _TypeOwnerGuard()
+        state["guard"] = guard.mode
+        for ch, delay in zip(text, delays):
+            kind, focus = _unit_block(guard)
+            if kind:
+                _remember_block(kind, focus)
+                break
+            try:
                 _inject(pyautogui.write, ch)
-                guard.after_write()
-                time.sleep(delay)
-                typed += 1
-            state["guard"] = guard.mode
-        else:
-            _inject(pyautogui.write, text, interval=0.02)
-            typed = len(text)
+            except _InputRefused as exc:
+                if typed == 0:
+                    state["pre_effect"] = exc.response
+                else:
+                    body = exc.response[0].get_json() if isinstance(exc.response, tuple) else exc.response.get_json()
+                    state["reason"] = (body or {}).get("error_code") or "aborted"
+                break
+            except Exception:
+                _release_chord(("shift", "ctrl", "alt"))
+                raise
+            guard.after_write()
+            time.sleep(delay)
+            typed += 1
+        state["guard"] = guard.mode
         return "keys"
 
     def _paste():
         backend = _clipboard_backend()
         if backend is None:
-            raise RuntimeError("clipboard unavailable on this host")
+            raise _PasteUnavailable("clipboard unavailable on this host")
         saved, readable = None, False
         try:
             saved = backend.get_text()
             readable = True
         except Exception:
-            pass  # unreadable clipboard: paste anyway, skip the restore
+            pass
+        guard = _TypeOwnerGuard()
+        state["guard"] = guard.mode
+        kind, focus = _unit_block(guard)
+        if kind:
+            raise _InputRefused(focus if focus is not None else _pre_effect_response(
+                "locked" if kind == "locked" else "owner"))
+        _before_effect()
         mutated = False
+        placed = None
+        chord_attempted = False
         try:
-            _before_effect()
+            try:
+                backend.set_text(text)
+            except _InputRefused:
+                raise
+            except Exception as exc:
+                if getattr(backend, "changed", False):
+                    mutated = True
+                    placed = text
+                    raise _PasteUncertain(f"clipboard mutation outcome unknown ({exc})")
+                raise _PasteUnavailable(str(exc))
             mutated = True
-            backend.set_text(text)
-            _inject(pyautogui.hotkey, "ctrl", "v")
+            placed = text
+            kind, _focus = _unit_block(guard)
+            if kind:
+                raise _PasteAborted({
+                    "ok": False,
+                    "error": f"paste stopped before the chord ({kind})",
+                    "error_code": "paste_aborted",
+                    "abort_reason": kind,
+                    "injected": False,
+                    "method_used": "paste",
+                })
+
+            def _chord():
+                nonlocal chord_attempted
+                chord_attempted = True
+                return pyautogui.hotkey("ctrl", "v")
+
+            try:
+                _inject(_chord)
+            except _InputRefused as exc:
+                if chord_attempted:
+                    raise _PasteUncertain("paste chord may have been sent during refusal") from exc
+                body = exc.response[0].get_json() if isinstance(exc.response, tuple) else exc.response.get_json()
+                raise _PasteAborted({
+                    "ok": False,
+                    "error": "paste stopped before the chord",
+                    "error_code": "paste_aborted",
+                    "abort_reason": (body or {}).get("error_code") or "aborted",
+                    "injected": False,
+                    "method_used": "paste",
+                })
             if readable:
-                # Give the target app a beat to consume the paste before the
-                # previous clipboard contents go back.
                 time.sleep(0.1)
+        except (_PasteUncertain, _PasteAborted, _PasteUnavailable, _InputRefused):
+            raise
+        except Exception as exc:
+            if chord_attempted or mutated:
+                raise _PasteUncertain(f"paste chord may have been sent ({exc})")
+            raise _PasteUnavailable(str(exc))
         finally:
+            if chord_attempted:
+                _release_chord(("ctrl", "v"))
             if mutated and readable and saved is not None:
                 try:
-                    backend.set_text(saved)
+                    current = backend.get_text()
                 except Exception:
-                    pass
+                    current = None
+                if current == placed:
+                    try:
+                        backend.set_text(saved)
+                    except Exception:
+                        pass
         return "paste"
 
-    with _input("keys"):
-        method_used, note = _type_dispatch(method, _keys, _paste, text)
+    try:
+        with _input("keys"):
+            method_used, note = _type_dispatch(method, _keys, _paste, text)
+    except _PasteUncertain as exc:
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "error_code": "paste_uncertain",
+            "method_used": "paste",
+            "injected": "uncertain",
+            "chars": len(text),
+        }), 502
+    except _PasteAborted as exc:
+        return jsonify(exc.body), exc.status
 
+    if state["pre_effect"] is not None and typed == 0:
+        return state["pre_effect"]
     if method_used == "keys" and typed < len(text):
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    # Deliberately NOT yield-classified (error_code is
-                    # not "yield"/"locked", and the prose avoids the
-                    # legacy substrings): some chars already landed, so
-                    # a queued retry of the whole payload would
-                    # double-type the prefix. The receipt settles
-                    # failed with chars_typed; the caller re-submits
-                    # text[chars_typed:].
-                    "error": (
-                        f"desktop locked — typing aborted at char {typed}"
-                        if state["reason"] == "locked"
-                        else f"owner became active — typing aborted at char {typed}"
-                    ),
-                    "error_code": "type_aborted",
-                    "abort_reason": state["reason"],
-                    "owner_guard": state["guard"],
-                    "aborted": True,
-                    "chars_typed": typed,
-                    "chars": len(text),
-                    "method_used": "keys",
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "delays_planned": len(delays),
-                    "planned_seconds": sum(delays[:typed]),
-                }
-            ),
-            409,
-        )
+        reason = state["reason"] or "owner"
+        if reason == "locked":
+            error = f"desktop locked — typing aborted at char {typed}"
+        elif reason == "foreground_changed":
+            error = f"foreground changed — typing aborted at char {typed}"
+        else:
+            error = f"owner became active — typing aborted at char {typed}"
+        body = {
+            "ok": False,
+            "error": error,
+            "error_code": "type_aborted",
+            "abort_reason": reason,
+            "owner_guard": state["guard"],
+            "aborted": True,
+            "chars_typed": typed,
+            "chars": len(text),
+            "method_used": "keys",
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "delays_planned": len(delays),
+            "planned_seconds": sum(delays[:typed]),
+        }
+        limit = {"hook": "non-injected-events-only",
+                 "dwtime": "same-tick-and-grace-blind"}.get(state["guard"])
+        if limit:
+            body["owner_attribution_limit"] = limit
+        return jsonify(body), 409
     resp = {
         "ok": True,
         "method_used": method_used,
@@ -1148,9 +1249,15 @@ def type_text():
         "delays_planned": len(delays),
         "planned_seconds": sum(delays),
     }
+    if state["guard"] == "hook":
+        resp["owner_attribution_limit"] = "non-injected-events-only"
+    elif state["guard"] == "dwtime":
+        resp["owner_attribution_limit"] = "same-tick-and-grace-blind"
     if note:
         resp["note"] = note
     return jsonify(resp)
+
+
 @app.post("/key")
 def key():
     d = request.get_json(force=True)
@@ -1975,6 +2082,7 @@ def state():
     body = {"ok": True, "platform": platform, "locked": locked, "idle_seconds": idle_seconds}
     body["owner_idle_seconds"] = _LEDGER.owner_idle(idle_seconds, _tick_ms())
     body["owner_coverage"] = owner_coverage()
+    body["owner_attribution_limit"] = _owner_attribution_limit()
     body["resting_hand"] = _resting.status()
     body["human_motion"] = _human_motion_default()
     # Display sleep follows the OS idle clock, which injected input
@@ -2562,9 +2670,11 @@ class _WindowsClipboardBackend:
         # clipboard on the PC; it shipped because this backend never
         # runs off Windows and no test faked _setup.
         nbytes = ctypes.sizeof(data)
+        self.changed = False
         if not user32.OpenClipboard(None):
             raise OSError("OpenClipboard failed")
         try:
+            self.changed = True  # EmptyClipboard is a mutation
             user32.EmptyClipboard()
             handle = kernel32.GlobalAlloc(0x0002, nbytes)  # GMEM_MOVEABLE
             if not handle:
@@ -2596,6 +2706,7 @@ class _PyperclipBackend:
         return self._mod.paste() or ""
 
     def set_text(self, text):
+        self.changed = True
         self._mod.copy(text)
 
 

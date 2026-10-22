@@ -177,8 +177,8 @@ def test_type_aborts_midway_when_owner_activates(hands, monkeypatch):
     # probe — GetLastInputInfo counts the type's own keystrokes, so
     # the old fake (idle drops at the 24-char re-check) scripted the
     # type aborting on ITSELF. The scenario is unchanged (the owner
-    # sits down mid-type; the type aborts at the next 12-char
-    # boundary with the honest partial), but it is driven through the
+    # sits down mid-type; the current unit finishes and the next
+    # character is not emitted), but it is driven through the
     # dwTime seam: our writes stamp the tick, and the owner's key
     # stamps it during the pause after char 18.
     state = {"tick": 100000, "dw": 94999, "sleeps": 0}
@@ -211,8 +211,8 @@ def test_type_aborts_midway_when_owner_activates(hands, monkeypatch):
     body = _body(resp)
     assert _status(resp) == 409
     assert body["error_code"] == "type_aborted"
-    assert body["chars_typed"] == 24
-    assert len(writes) == 24
+    assert body["chars_typed"] == 18
+    assert len(writes) == 18
     # The abort must NOT be yield-classified by either mechanism, or a
     # queued retry would re-type the whole payload.
     assert "yield" not in body["error"]

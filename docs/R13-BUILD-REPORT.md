@@ -152,3 +152,34 @@ Commands:
 Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_owner_service.py tests/test_relay_fix_acceptance.py -k 'recent_owner or degraded_coverage or tick_rollover or p07 or p11'`: 8 passed, 16 deselected.
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 337 passed, 1 skipped.
+
+
+## B10 — guarded typing and narrow paste fallback
+
+### Legacy expectation revision (Muse ruling)
+
+Authority: B10 and F5, "Required behavior and invariants". The same bounded key loop is used whether or not jitter is on; jitter changes delays only. Owner, lock, and focus are sampled before each character. An owner event during the current unit stops the next unit. The 12-character boundary is not the contract.
+
+Only the assertions that encoded that old boundary were changed. No other assertions in these tests were edited.
+
+| Test | Old expectation | New expectation |
+| --- | --- | --- |
+| `tests/test_r72_fixround.py::test_owner_input_between_injection_and_postwrite_probe_aborts` | `chars_typed == 24` and `URL40[:24]` | `chars_typed == 18` and `URL40[:18]` |
+| `tests/test_r72_fixround.py::test_type_aborts_on_lock_without_input` | `chars_typed == 24`, `len(written) == 24`, `URL40[:24]` | 18 / 18 / `URL40[:18]` |
+| `tests/test_r72_fixround.py::test_probe_failure_then_recovery_still_detects_owner` | `chars_typed == 24` | `chars_typed == 18` |
+| `tests/test_r72_fixround.py::test_owner_input_past_publish_grace_is_detected` | `chars_typed == 24` | `chars_typed == 14` (owner during the sleep after character 14) |
+| `tests/test_r72_fixround.py::test_hook_mode_owner_on_sleep_18_aborts_at_24` | `chars_typed == 24` | `chars_typed == 18` |
+| `tests/test_v3r4.py::test_type_aborts_midway_when_owner_activates` | `chars_typed == 24` and `len(writes) == 24` | 18 and 18 |
+
+`test_owner_input_after_char12_aborts_before_char13` already stopped at the next character and was not changed.
+
+### Behavior
+
+`/type` keys mode, jitter true or false, writes one character per unit and sleeps the planned delay or a fixed 0.02 s. A hook event during the current write is still that owner's event and cancels the following character. No characters yet means a yield or focus refusal, not a partial abort. A focus change after characters keeps `chars_typed`. Hook responses expose `owner_attribution_limit: non-injected-events-only` (other injected input is not this relay). dwTime responses expose `same-tick-and-grace-blind`. `/state` reports the same limit. There is no clipboard generation counter: restore treats an equal string as still ours.
+
+Paste falls back to keys only when the clipboard is missing or `set_text` fails before a mutation. After a mutation, owner/lock/focus before Ctrl+V does not paste and does not type. Restore runs only if the clipboard still holds the placed value. A chord that may have been sent returns `paste_uncertain` with no `chars_typed` and no typing fallback, and releases Ctrl and V.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_guarded_typing.py tests/test_r72_fixround.py tests/test_v3r4.py::test_type_aborts_midway_when_owner_activates tests/test_v3r4.py::test_type_completes_when_owner_stays_away tests/test_v3r2_remaining.py::test_paste_restores_clipboard_when_hotkey_raises tests/test_r13_first_effect.py`: 50 passed.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py -k 'p12 or p11'`: 4 passed, 17 deselected.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 346 passed, 1 skipped.
