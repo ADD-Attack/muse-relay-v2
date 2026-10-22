@@ -115,3 +115,11 @@ Commands:
 `tests/test_r11_resting_watch.py::test_real_act_resets_the_global_ramp`, lines 190–192, opens `_input("mouse")` and immediately expects the resting intensity to reset despite performing no injection. The framework's shared timing contract says a refused action that never started must not reset the resting ramp or clear owner-stop state. An action may acquire input access and subsequently expire during attention/read preparation; therefore entering the mutex cannot irrevocably mark a real act. B07 starts/rests the act only at the first-side-effect boundary.
 
 Proposed minimal harness resolution: add one simulated movement via `_inject` inside this test's input context, before its existing reset assertions. Keep all intensity and `last_act_end` expectations unchanged. This makes the test actually exercise the real act its name promises. New B07 tests separately prove a no-effect context leaves resting state untouched and a real injection calls begin/end. The legacy file remains unchanged; no further expectation/harness supersession is assumed. B08 onward has not started pending this one-at-a-time gate resolution. No deployment or live R12 changes.
+
+
+### B07 setup adjustment authorized and gate cleared
+
+Muse authorized the minimal setup change in `tests/test_r11_resting_watch.py::test_real_act_resets_the_global_ramp`. Added one simulated movement, `hands._inject(hands.pyautogui.moveTo, 1, 2)`, inside the existing input context and before the existing intensity assertions. No expected values changed. Authority: B07/F1 first-side-effect timing; a context that never injects must not reset the resting ramp.
+
+Reruns after the setup change:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 331 passed, 1 skipped (prior interrupted session).

@@ -188,6 +188,7 @@ def test_real_act_resets_the_global_ramp(hands, rig, monkeypatch):
     r.set_claim(True, 900, 1, 0.0)
     assert r.intensity(50.0) == 1.0
     with hands._input("mouse"):
+        hands._inject(hands.pyautogui.moveTo, 1, 2)
         assert r.intensity(50.0) == 0.0
     assert r.intensity(50.0) == 0.0 and r.last_act_end == 50.0
 
