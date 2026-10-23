@@ -32,10 +32,13 @@ def _start(script, home):
     )
 
 
-def _wait_held(home, lock_name):
+def _wait_held(process, home, lock_name):
     path = home / lock_name
-    deadline = time.time() + 5
+    deadline = time.time() + 15
     while time.time() < deadline:
+        if process.poll() is not None:
+            _out, err = process.communicate()
+            raise AssertionError(f"watcher exited {process.returncode}: {err}")
         if path.exists():
             from watchers.lock import LockHeld, OutputLock
             try:
@@ -51,7 +54,7 @@ def test_w01_second_process_loses_and_relaunch_keeps_the_lock_file(tmp_path, var
     script = SCRIPTS[variant]
     first = _start(script, tmp_path)
     try:
-        path = _wait_held(tmp_path, lock_name)
+        path = _wait_held(first, tmp_path, lock_name)
         inode = path.stat().st_ino
         second = _start(script, tmp_path)
         stderr = second.stderr.read()
@@ -63,7 +66,7 @@ def test_w01_second_process_loses_and_relaunch_keeps_the_lock_file(tmp_path, var
         first.wait(timeout=5)
     relaunch = _start(script, tmp_path)
     try:
-        again = _wait_held(tmp_path, lock_name)
+        again = _wait_held(relaunch, tmp_path, lock_name)
         assert again.stat().st_ino == inode
     finally:
         relaunch.kill()

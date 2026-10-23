@@ -419,3 +419,34 @@ The gateway integration uses B17. A validated `/v1/screen?watcher=abraham` sets 
 
 Command:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_telemetry.py`: 5 passed. W04 and W05 on both variants, plus the B17 heartbeat check.
+
+
+## B18 consumer
+
+`watchers/consumer.py` reads `manifest.json` and the status file together. Two consumers see the same full and display bytes. A clock step backward, or a manifest generation below one this consumer already accepted, is `unknown`. Age of 10 seconds with no newer success is `stale`. A new consumer after a restart still accepts a current publication.
+
+W07 launches `watchers/watch-live.py` and `watchers/watch-live-laptop.py`. The pause file for that variant makes the next poll `paused`. Removing it resumes a fresh capture. That file is new: the inputs have no pause symbol. The supplied launch is the script itself; no separate supervisor was in the input.
+
+W08's local rule refuses a fresh screenshot when the configured application log has not grown. Two polls three seconds apart, with the log advanced between them, are accepted. This is not the supervised workflow. TunerStudio was not running. Watcher 38 is not closed.
+
+Command:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_consumer.py tests/test_r13_watch_lock.py`: 8 passed.
+
+## Wrap-up
+
+Candidate `v3-r13-candidate`.
+
+- B18 lock `60e7812`
+- B18 publication `06d49ce`
+- B18 telemetry `ad9b07a`
+- B18 consumer: this commit
+
+Commands after the consumer tests:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 411 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 21 passed.
+
+Still open, not claimed:
+- Watcher 38. W01–W07 passed here on both supplied variants. W08's supervised application-log workflow did not run.
+- F7-C packaged Windows capture at 100/125/150 percent. No executable hash, topology, or DPI measurement.
+- The Windows `msvcrt` lock branch was not executed. These tests used Linux `fcntl.flock`.
+- `hands/test_capture_realism.py` still has the untouched failing check `jitter=false: single legacy write, no per-char sleeps`. That script is outside pytest.
