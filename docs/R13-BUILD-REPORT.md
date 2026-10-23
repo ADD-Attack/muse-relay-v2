@@ -399,3 +399,13 @@ Symbols that are not in either input: an OS lock, a heartbeat, a failure record,
 
 Command:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_lock.py`: 2 passed (W01, both variants).
+
+
+## B18 publication
+
+`watchers/publish.py` writes `full.png`, `display.png`, and `meta.json` into `generations/<id>/` under unique temporary names, then renames one `manifest.json`. The pointer moves only forward, under the counter lock, so a slower publisher cannot aim it at a generation the winner already deleted. Cleanup removes older generation directories and never the one the manifest names. The input's three shared `.tmp` names are not used. The legacy `screen-live.png`, full image, and epoch file are rewritten only after the manifest, as a mirror. Readers that need one snapshot use `read_published`.
+
+A crash after `full`, `display`, or `meta` leaves the previous manifest. A crash after the manifest rename exposes the new generation with matching hashes. `WATCH_DISABLE_LOCK=1` is the fault-injection build for W02, not the normal entry.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_lock.py tests/test_r13_watch_publish.py`: 14 passed. W01 still passes. W02 and W03 pass on both variants.
