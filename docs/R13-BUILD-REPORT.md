@@ -372,3 +372,30 @@ Commands:
 ## B18 — not started
 
 The framework names `watch-live-laptop.py` and an Abraham watcher variant. Neither file is in this repo. Their functions were not invented, and W01–W08 were not run. Watcher 38 is not closed. F7-C, the packaged Windows capture at 100/125/150 percent, is also still open.
+
+
+## B18 inputs
+
+Fetched from `v3-r13-spec` commit `5bf44ec209239662639f63cda9a3d3be205de6a2`. They are inputs under `docs/r13-inputs/watchers/`, not the candidate implementation.
+
+| File | SHA-256 | Bytes |
+| --- | --- | --- |
+| `watch-live.py` (Abraham, Christopher's 2026-10-19 design) | `8d4511e54bd0ca5d5952b82f9916280087ae52d8c034f38e88fb658c9941eeaf` | 2327 |
+| `watch-live-laptop.py` (ECU laptop, LAPTOP-UAPTFJ1J) | `975904f89bf98ba350de315863617c1f64efbf76ec78b11adf335132a22e58cc` | 2492 |
+
+Symbols that are actually in both inputs:
+
+- `fetch` — curl through `http://hatch-egress-proxy:3130`, 10s timeout, PNG magic, exceptions swallowed.
+- The poll loop is not a function. It decodes with `Image.open`, writes `FULL + ".tmp"`, `LIVE + ".tmp"`, and `EPOCH + ".tmp"`, and renames those three names separately.
+- `LOG` is appended only after a successful decode. A failed fetch writes nothing.
+
+Symbols that are not in either input: an OS lock, a heartbeat, a failure record, and a consumer. The Abraham comment mentions `watch-live.pid` written by a launcher that was not supplied. That is not a lock. New repair names are in `watchers/` and are not claimed to be the input.
+
+## B18 lock
+
+`watchers/lock.py` `OutputLock` holds `fcntl.flock` on Linux (or `msvcrt.locking` on Windows) for the life of the process and never deletes the lock file. Abraham locks `screen-live.lock`. The laptop locks `screen-laptop-live.lock`. A second process prints `another watcher holds the output lock` and exits 1. Kill plus relaunch takes the same inode.
+
+`watchers/watch-live.py` and `watchers/watch-live-laptop.py` are the candidate entries. Defaults keep each input's URL, home, and file names. `WATCH_HOME` is how the tests avoid `~/workspace`.
+
+Command:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_lock.py`: 2 passed (W01, both variants).
