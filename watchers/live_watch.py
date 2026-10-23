@@ -19,6 +19,7 @@ from PIL import Image
 
 from lock import LockHeld, OutputLock
 from publish import PublishError, publish
+from telemetry import load_status, note_failure, note_heartbeat, note_success, store_status
 
 POLL_S = 3.0
 DEADLINE_S = 5.0
@@ -35,6 +36,8 @@ ABRAHAM = {
     "epoch": "screen-live.txt",
     "log": "screen-live.log",
     "lock": "screen-live.lock",
+    "pause": "screen-live.pause",
+    "status": "screen-live.status.json",
 }
 LAPTOP = {
     "name": "laptop",
@@ -46,6 +49,8 @@ LAPTOP = {
     "epoch": "screen-laptop-live.txt",
     "log": "screen-laptop-live.log",
     "lock": "screen-laptop-live.lock",
+    "pause": "screen-laptop-live.pause",
+    "status": "screen-laptop-live.status.json",
 }
 
 
@@ -142,25 +147,64 @@ def with_watcher(url, holder):
     return url + ("&" if "?" in url else "?") + "watcher=" + holder
 
 
-def poll_once(config, home, token, fetch, now):
+def _origin(url):
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def beat_curl(origin, holder, token, timeout):
+    command = [
+        "curl", "-sS", "--max-time", str(timeout), "-X", "POST",
+        "-H", "X-Relay-Token: " + token,
+        "-H", "Content-Type: application/json",
+        "--data-binary", '{"holder": "%s"}' % holder,
+        origin.rstrip("/") + "/v1/watch",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=float(timeout) + 1.0)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise FetchError("heartbeat_failed") from exc
+    if result.returncode != 0:
+        raise FetchError("heartbeat_failed")
+
+
+def poll_once(config, home, token, fetch, now, beat=None):
     url = with_watcher(os.environ.get("WATCH_URL", config["url"]), config["holder"])
     deadline = _env_float("WATCH_DEADLINE_S", DEADLINE_S)
     proxy = os.environ.get("WATCH_PROXY", PROXY)
     log_path = os.path.join(home, config["log"])
+    status_path = os.path.join(home, config["status"])
+    status = load_status(status_path)
+    status["poll_s"] = _env_float("WATCH_POLL_S", POLL_S)
+    status["deadline_s"] = deadline
+    status["stale_s"] = _env_float("WATCH_STALE_S", STALE_S)
+    stamp = now()
+    note_heartbeat(status, stamp)
+    try:
+        (beat if beat is not None else beat_curl)(_origin(url), config["holder"], token, deadline)
+    except Exception:
+        append_log(log_path, "HEARTBEAT %f failed\n" % stamp)
+    if os.path.exists(os.path.join(home, config["pause"])):
+        status["paused"] = True
+        store_status(status_path, status)
+        return None
+    status["paused"] = False
     try:
         png = fetch(url, token, deadline, proxy)
         image = decode_image(png)
-        epoch = now()
+        content_hash = masked_hash(image)
+        previous = status.get("content_hash")
+        changed = 1 if previous is not None and previous != content_hash else 0
         meta = {
-            "epoch": epoch,
+            "epoch": stamp,
             "variant": config["name"],
-            "content_hash": masked_hash(image),
+            "content_hash": content_hash,
             "width": image.size[0],
             "height": image.size[1],
         }
         full = png_bytes(image)
         shown = png_bytes(display_image(image))
-        epoch_text = str(epoch).encode("ascii")
         manifest = publish(
             home, full, shown, meta,
             crash_after=os.environ.get("WATCH_CRASH_AFTER") or None,
@@ -168,19 +212,27 @@ def poll_once(config, home, token, fetch, now):
             mirrors=(
                 (config["full"], full),
                 (config["live"], shown),
-                (config["epoch"], epoch_text),
+                (config["epoch"], str(stamp).encode("ascii")),
             ),
         )
         if manifest is None:
+            note_failure(status, stamp, "superseded")
+            append_log(log_path, "FAIL %f superseded\n" % stamp)
+            store_status(status_path, status)
             return None
-        short = meta["content_hash"][:12]
-        append_log(log_path, "%f %s changed=%d\n" % (epoch, short, 0))
+        note_success(status, stamp, content_hash, manifest.get("published_at"))
+        append_log(log_path, "%f %s changed=%d\n" % (stamp, content_hash[:12], changed))
+        store_status(status_path, status)
         return manifest
     except FetchError as exc:
-        append_log(log_path, "FAIL %f %s\n" % (now(), exc.code))
+        note_failure(status, stamp, exc.code)
+        append_log(log_path, "FAIL %f %s\n" % (stamp, exc.code))
+        store_status(status_path, status)
         return None
     except PublishError as exc:
-        append_log(log_path, "FAIL %f %s\n" % (now(), exc.code))
+        note_failure(status, stamp, exc.code)
+        append_log(log_path, "FAIL %f %s\n" % (stamp, exc.code))
+        store_status(status_path, status)
         return None
 
 

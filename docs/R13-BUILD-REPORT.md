@@ -409,3 +409,13 @@ A crash after `full`, `display`, or `meta` leaves the previous manifest. A crash
 
 Commands:
 - `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_lock.py tests/test_r13_watch_publish.py`: 14 passed. W01 still passes. W02 and W03 pass on both variants.
+
+
+## B18 telemetry
+
+`watchers/telemetry.py` keeps attempt, success, publication, heartbeat, and content-change times apart. `poll_once` writes that status before it considers the fetch done. A heartbeat, including `POST /v1/watch`, updates `process_heartbeat_at` only. Fetch failures (`http_502`, `timeout`, `invalid_png`, `disk_full`) increment `consecutive_failures` and do not move `last_success_at` or `last_published_at`. Eleven identical frames over 30 simulated seconds move the observation generation and leave `content_changed_at` on the first frame. The log line stays `changed=0`. After that, a failed fetch is an error immediately, and it is also stale once the last success is 10 seconds old. P=3, T=5, and S=10 are the status values. The input's curl timeout was 10; the repaired deadline is T=5.
+
+The gateway integration uses B17. A validated `/v1/screen?watcher=abraham` sets the gateway success time. A later pause heartbeats `/v1/watch` and does not move that time. The local status is `paused`, not fresh.
+
+Command:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watch_telemetry.py`: 5 passed. W04 and W05 on both variants, plus the B17 heartbeat check.
