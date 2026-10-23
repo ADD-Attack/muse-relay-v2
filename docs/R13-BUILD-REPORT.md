@@ -350,3 +350,25 @@ Commands:
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 20 passed, 1 failed. The failure is still P08 (`last_success_at` is absent). No acceptance assertion was edited. P13 passed.
 
 Unresolved: F7-C packaged Windows evidence, and P08's watcher success timestamp (B17).
+
+
+## B17 — relay watcher freshness
+
+Contact and observation are different clocks. `last_seen` moves on a screen attempt and on `POST /v1/watch`. `last_success_at` moves only when the gateway validated a new capture. A failed fetch or an invalid PNG sets `last_fetch_ok` false and leaves `last_success_at` where it was. The same pixels still increment `observation_generation` and do not move `content_changed_at`.
+
+`POST /v1/watch` is a heartbeat. It sets `process_heartbeat_at` and does not change `last_success_at` or clear `last_fetch_ok`. An error stays an error. Age since `last_success_at` of at least S is stale. S is `WATCHER_STALE_SECONDS`, default 10, and a non-positive or non-finite value falls back to 10. A paused watcher is `paused`, including when the last capture succeeded. A registration with no capture yet is `unknown`.
+
+A 304 is a successful observation only because `/v1/screen` decodes the new capture before comparing the ETag. `last_published_at` stays null. This gateway does not publish the external watcher's files, and a capture here is not proof that a client published one.
+
+The dashboard still lists watcher names as contact. `observations` is separate. Diagnostics add `Observation: <holder> <label>` and leave the existing mode line intact. The UI shows the observation beside the contact names.
+
+Poll interval P=3 and request deadline T=5 are the external watcher's acceptance settings. No watcher process is in this repo, so those numbers were not copied onto the gateway's own hands timeout.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_watcher_freshness.py tests/test_r11_resting_watch.py tests/test_relay_fix_acceptance.py::test_p08_failed_fetch_preserves_last_success_but_marks_error`: 35 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 386 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 21 passed.
+
+## B18 — not started
+
+The framework names `watch-live-laptop.py` and an Abraham watcher variant. Neither file is in this repo. Their functions were not invented, and W01–W08 were not run. Watcher 38 is not closed. F7-C, the packaged Windows capture at 100/125/150 percent, is also still open.

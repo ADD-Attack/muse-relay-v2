@@ -160,10 +160,15 @@
       modeText = "—";
     }
     setText($("agent-mode"), modeText, modeCls);
-    $("agent-mode").title = watchers.length ? `Watching (eyes only): ${watchers.join(", ")}` : "Watcher: eyes only (screen polling, no actuation). Hands control: claim held.";
+    const observations = (m && m.observations) || [];
+    const observed = observations.map((row) => `${row.holder}: ${row.observation}`);
+    $("agent-mode").title = observed.length
+      ? `Contact is not observation. ${observed.join(", ")}`
+      : (watchers.length ? `Watching (eyes only): ${watchers.join(", ")}` : "Watcher: eyes only (screen polling, no actuation). Hands control: claim held.");
     const wt = m && m.watcher_timeout_s;
     const parts = [];
     if (watchers.length) parts.push(mode === "watcher" ? watchers.join(", ") : `${watchers.length} watching`);
+    if (observed.length) parts.push(observed.join(", "));
     parts.push(wt == null ? "watcher timeout —" : `watcher timeout ${dur(wt)}`);
     setText($("watcher-setting"), parts.join(" · "));
   }

@@ -270,7 +270,44 @@ def _watcher_timeout_setting():
         return _watcher_timeout
 
 
-def _touch_watcher(holder, timeout_seconds=None, now=None):
+def _watcher_stale_setting():
+    """Explicit stale threshold S. Acceptance fixtures use 10 seconds.
+
+    This is not the contact timeout. A heartbeat can refresh contact
+    without making an old observation fresh.
+    """
+    raw = os.environ.get("WATCHER_STALE_SECONDS", "10")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 10.0
+    if not math.isfinite(value) or value <= 0:
+        return 10.0
+    return value
+
+
+def _blank_watcher(holder, now, timeout_seconds):
+    return {
+        "holder": holder,
+        "since": now,
+        "timeout_seconds": timeout_seconds,
+        "last_seen": now,
+        "last_success_at": None,
+        "last_fetch_ok": None,
+        "last_attempt_at": None,
+        "last_published_at": None,
+        "process_heartbeat_at": None,
+        "consecutive_failures": 0,
+        "last_error": None,
+        "observation_generation": 0,
+        "content_hash": None,
+        "content_changed_at": None,
+        "paused": False,
+    }
+
+
+def _touch_watcher(holder, timeout_seconds=None, now=None, heartbeat=False, paused=None):
+    """Refresh contact. Never advances a validated observation."""
     holder = str(holder or "").strip()[:80]
     if not holder:
         return None
@@ -279,14 +316,76 @@ def _touch_watcher(holder, timeout_seconds=None, now=None):
     with _watch_lock:
         entry = _watchers.get(holder)
         if entry is None or now >= entry["last_seen"] + entry["timeout_seconds"]:
-            entry = {"holder": holder, "since": now, "timeout_seconds": default}
+            entry = _blank_watcher(holder, now, default)
             _watchers[holder] = entry
         if timeout_seconds is not None:
             entry["timeout_seconds"] = _clamp_number(
                 timeout_seconds, default, WATCHER_TIMEOUT_MIN, WATCHER_TIMEOUT_MAX
             )
         entry["last_seen"] = now
-        return dict(entry)
+        if heartbeat:
+            entry["process_heartbeat_at"] = now
+        if paused is not None:
+            entry["paused"] = bool(paused)
+        return _public_watcher(entry, now)
+
+
+def _record_watcher_fetch(holder, ok, error=None, digest=None, now=None):
+    """Record one capture attempt. Failure does not move last_success_at."""
+    holder = str(holder or "").strip()[:80]
+    if not holder:
+        return None
+    now = time.time() if now is None else now
+    default = _watcher_timeout_setting()
+    with _watch_lock:
+        entry = _watchers.get(holder)
+        if entry is None or now >= entry["last_seen"] + entry["timeout_seconds"]:
+            entry = _blank_watcher(holder, now, default)
+            _watchers[holder] = entry
+        entry["last_seen"] = now
+        entry["last_attempt_at"] = now
+        entry["last_fetch_ok"] = bool(ok)
+        if ok:
+            entry["last_success_at"] = now
+            entry["consecutive_failures"] = 0
+            entry["last_error"] = None
+            entry["observation_generation"] = int(entry.get("observation_generation") or 0) + 1
+            if digest is not None and digest != entry.get("content_hash"):
+                entry["content_hash"] = digest
+                entry["content_changed_at"] = now
+        else:
+            entry["consecutive_failures"] = int(entry.get("consecutive_failures") or 0) + 1
+            entry["last_error"] = error or "fetch_failed"
+        return _public_watcher(entry, now)
+
+
+def _watcher_success_age(entry, now):
+    success = entry.get("last_success_at")
+    if isinstance(success, bool) or not isinstance(success, (int, float)):
+        return None
+    if not math.isfinite(float(success)):
+        return None
+    return now - float(success)
+
+
+def _public_watcher(entry, now):
+    """Copy plus the label a client can show. Contact is not observation."""
+    out = dict(entry)
+    age = _watcher_success_age(entry, now)
+    stale = age is not None and age >= _watcher_stale_setting()
+    if entry.get("paused"):
+        label = "paused"
+    elif entry.get("last_fetch_ok") is False:
+        label = "error"
+    elif age is None:
+        label = "unknown"
+    elif stale:
+        label = "stale"
+    else:
+        label = "fresh"
+    out["stale"] = stale
+    out["observation"] = label
+    return out
 
 
 def _current_watchers(now=None):
@@ -295,7 +394,7 @@ def _current_watchers(now=None):
     with _watch_lock:
         for holder in [h for h, e in _watchers.items() if now >= e["last_seen"] + e["timeout_seconds"]]:
             del _watchers[holder]
-        return sorted((dict(e) for e in _watchers.values()), key=lambda e: e["since"])
+        return sorted((_public_watcher(e, now) for e in _watchers.values()), key=lambda e: e["since"])
 
 
 def _active_reservation_locked(now):
@@ -530,6 +629,7 @@ def info():
             "pc_state": pc_state,
             "watchers": _current_watchers(),
             "watcher_timeout_seconds": _watcher_timeout_setting(),
+            "watcher_stale_seconds": _watcher_stale_setting(),
             "claim_sync": dict(_sync_health),
         }
     )
@@ -546,7 +646,12 @@ def watch_status():
 def watch_touch():
     """{holder, timeout_seconds?}: start or refresh watcher (eyes-only) mode."""
     body = request.get_json(force=True, silent=True) or {}
-    entry = _touch_watcher(body.get("holder"), body.get("timeout_seconds"))
+    paused = body.get("paused") if "paused" in body else None
+    if paused is not None and not isinstance(paused, bool):
+        return jsonify({"ok": False, "error": "paused must be a boolean"}), 400
+    entry = _touch_watcher(
+        body.get("holder"), body.get("timeout_seconds"), heartbeat=True, paused=paused
+    )
     if entry is None:
         return jsonify({"ok": False, "error": "holder is required"}), 400
     return jsonify({"ok": True, "watcher": entry})
@@ -1070,8 +1175,7 @@ def screen():
     the gateway can decode images; a matching If-None-Match gets a 304
     so pollers can skip re-downloading unchanged frames.
     """
-    if request.args.get("watcher"):
-        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
+    holder = request.args.get("watcher")
     kwargs, err = _screen_fetch_kwargs()
     if err is not None:
         return err
@@ -1079,6 +1183,7 @@ def screen():
     _capture_tls.variant = None
     png, content_type, err = _fetch_screenshot(**kwargs)
     if err is not None:
+        _record_watcher_fetch(holder, False, error="fetch_failed")
         return err
     resp = Response(png, content_type=content_type)
     meta = getattr(_capture_tls, "meta", None) or {}
@@ -1091,7 +1196,13 @@ def screen():
     try:
         digest, _, _ = _frame_hash(png, None, DEFAULT_MASK_BOTTOM)
     except _HashUnavailable:
+        _record_watcher_fetch(holder, False, error="decode_unavailable")
         return resp
+    except (OSError, ValueError):
+        _record_watcher_fetch(holder, False, error="invalid_capture")
+        return jsonify({"ok": False, "error": "capture could not be validated"}), 502
+    # A 304 below still validated this new capture. Contact alone does not.
+    _record_watcher_fetch(holder, True, digest=digest)
     token = f"{variant}:{digest}"
     resp.headers["ETag"] = f'"{token}"'
     inm = (request.headers.get("If-None-Match") or "").strip()
@@ -1112,8 +1223,7 @@ def screen_hash():
     agree, so a blinking caret cannot flip the result. ?monitor=N /
     ?region=x,y,w,h select the capture variant being hashed.
     """
-    if request.args.get("watcher"):
-        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
+    holder = request.args.get("watcher")
     stable = (request.args.get("stable") or "").lower() in ("1", "true", "yes")
     try:
         mask_bottom = int(request.args.get("mask_bottom", DEFAULT_MASK_BOTTOM))
@@ -1128,17 +1238,20 @@ def screen_hash():
     _capture_tls.variant = None
     png_a, _, err = _fetch_screenshot(**kwargs)
     if err is not None:
+        _record_watcher_fetch(holder, False, error="fetch_failed")
         return err
     png_b = None
     if stable:
         time.sleep(STABLE_SAMPLE_GAP)
         png_b, _, err = _fetch_screenshot(**kwargs)
         if err is not None:
+            _record_watcher_fetch(holder, False, error="fetch_failed")
             return err
     size_match = []
     try:
         digest, width, height = _frame_hash(png_a, png_b, mask_bottom, size_match)
     except _HashUnavailable:
+        _record_watcher_fetch(holder, False, error="decode_unavailable")
         return (
             jsonify(
                 {
@@ -1148,6 +1261,10 @@ def screen_hash():
             ),
             501,
         )
+    except (OSError, ValueError):
+        _record_watcher_fetch(holder, False, error="invalid_capture")
+        return jsonify({"ok": False, "error": "capture could not be validated"}), 502
+    _record_watcher_fetch(holder, True, digest=digest)
     return jsonify(
         {
             "ok": True,
@@ -1174,8 +1291,7 @@ def screen_wait():
     Single-sample (not the two-frame stable composite) so a 25s hold is not
     a chain of 0.65s gaps.
     """
-    if request.args.get("watcher"):
-        _touch_watcher(request.args.get("watcher"))  # R11 watcher mode
+    holder = request.args.get("watcher")
     since = request.args.get("since", request.args.get("hash", ""))
     if not isinstance(since, str):
         since = ""
@@ -1202,10 +1318,12 @@ def screen_wait():
     while True:
         png, _, err = _fetch_screenshot(**kwargs)
         if err is not None:
+            _record_watcher_fetch(holder, False, error="fetch_failed")
             return err
         try:
             digest, width, height = _frame_hash(png, None, mask_bottom)
         except _HashUnavailable:
+            _record_watcher_fetch(holder, False, error="decode_unavailable")
             return (
                 jsonify(
                     {
@@ -1215,6 +1333,9 @@ def screen_wait():
                 ),
                 501,
             )
+        except (OSError, ValueError):
+            _record_watcher_fetch(holder, False, error="invalid_capture")
+            return jsonify({"ok": False, "error": "capture could not be validated"}), 502
         if digest != since:
             timed_out = False
             break
@@ -1222,6 +1343,7 @@ def screen_wait():
         if remaining <= 0:
             break
         time.sleep(min(0.2, remaining))
+    _record_watcher_fetch(holder, True, digest=digest)
     return jsonify(
         {
             "ok": True,
