@@ -330,3 +330,23 @@ Commands:
 - `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 20 passed, 1 failed. The failure is P08, `last_success_at` is absent. Gateway watcher code was not modified. That field is B17. P13 passed in this run.
 
 Unresolved: F7-C packaged Windows evidence is not part of this package. No executable was built here, and no DPI measurement was taken.
+
+
+## B16 — capture variant on the gateway
+
+`/v1/screen` ETags are `variant:pixel-hash`. The variant is `legacy`, `monitor=N`, or `region=x,y,w,h`. A conditional request matches only that same variant. Identical pixels on two variants do not 304 each other. The gateway does not keep a screenshot cache: each route calls the hands again.
+
+Hands response headers `X-Screen-Width`, `X-Screen-Height`, `X-Screen-Monitor`, `X-Screen-Region`, `X-Screen-Origin`, `X-Screen-Surface`, and `X-Screen-Rect` are copied onto the gateway response. The gateway also sets `X-Screen-Variant`. If a hands header names a different monitor or region than the request, the gateway returns 502 and does not hash those bytes. The same refusal applies to `/v1/screen/hash`.
+
+`/v1/screen/hash` and `/v1/screen/wait` add `variant` and `capture`. The `hash` field remains the pixel digest, so an existing `since` comparison still compares pixels. That digest is not a variant identity. Callers have to read `variant` with it.
+
+`_fetch_screenshot` still returns the historical three-tuple. Variant headers ride a thread-local that each screen route clears before the fetch, so a test stub that returns three values cannot reuse the previous capture's headers.
+
+F7-C is not closed. No Windows package was built in this session, so there is no executable hash, no measured topology, no DPI mode, and no image dimensions from a packaged build at 100/125/150 percent. The required mode, recorded in `capture_virtual_surface`, is Per-Monitor-V2. `hands/requirements-capture.txt` pins `pillow==13.0.0` for the Linux simulation only. pyautogui is named there and is not installed as a distribution in the test environment; the tests inject a fake. Simulation cannot close this gate.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r13_capture_gateway.py`: 4 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 379 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 20 passed, 1 failed. The failure is still P08 (`last_success_at` is absent). No acceptance assertion was edited. P13 passed.
+
+Unresolved: F7-C packaged Windows evidence, and P08's watcher success timestamp (B17).

@@ -875,6 +875,55 @@ def elevate_status(eid):
     return _hands_forward("GET", f"/elevate/{eid}")
 
 
+_capture_tls = threading.local()
+_CAPTURE_RESPONSE_HEADERS = (
+    "X-Screen-Width",
+    "X-Screen-Height",
+    "X-Screen-Monitor",
+    "X-Screen-Region",
+    "X-Screen-Origin",
+    "X-Screen-Surface",
+    "X-Screen-Rect",
+)
+
+
+def _variant_key(monitor=None, region=None):
+    """Identity of one capture. A pixel hash alone is not this identity."""
+    if monitor is not None:
+        return f"monitor={int(monitor)}"
+    if region is not None:
+        return f"region={region}"
+    return "legacy"
+
+
+def _header_value(headers, name):
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return None
+    return getter(name)
+
+
+def _capture_meta_from(headers, monitor, region):
+    """Copy variant headers, or None when they describe a different capture."""
+    monitor_header = _header_value(headers, "X-Screen-Monitor")
+    region_header = _header_value(headers, "X-Screen-Region")
+    if monitor is None and region is None:
+        if monitor_header not in (None, "") or region_header not in (None, ""):
+            return None
+    if monitor is not None and monitor_header not in (None, "") and str(monitor_header) != str(int(monitor)):
+        return None
+    if region is not None and region_header not in (None, "") and str(region_header) != str(region):
+        return None
+    meta = {}
+    for name in _CAPTURE_RESPONSE_HEADERS:
+        value = _header_value(headers, name)
+        if value not in (None, ""):
+            meta[name] = str(value)
+    return meta
+
+
 def _fetch_screenshot(monitor=None, region=None):
     """One screenshot from the hands.
 
@@ -923,6 +972,16 @@ def _fetch_screenshot(monitor=None, region=None):
             jsonify({"ok": False, "error": f"hands returned {r.status_code}"}),
             502,
         )
+    meta = _capture_meta_from(r.headers, monitor, region)
+    if meta is None:
+        return None, None, (
+            jsonify(
+                {"ok": False, "error": "capture metadata does not match the requested variant"}
+            ),
+            502,
+        )
+    _capture_tls.meta = meta
+    _capture_tls.variant = _variant_key(monitor, region)
     return r.content, r.headers.get("Content-Type", "image/png"), None
 
 
@@ -1016,18 +1075,27 @@ def screen():
     kwargs, err = _screen_fetch_kwargs()
     if err is not None:
         return err
+    _capture_tls.meta = None
+    _capture_tls.variant = None
     png, content_type, err = _fetch_screenshot(**kwargs)
     if err is not None:
         return err
     resp = Response(png, content_type=content_type)
+    meta = getattr(_capture_tls, "meta", None) or {}
+    variant = getattr(_capture_tls, "variant", None) or _variant_key(
+        kwargs.get("monitor"), kwargs.get("region")
+    )
+    for name, value in meta.items():
+        resp.headers[name] = value
+    resp.headers["X-Screen-Variant"] = variant
     try:
         digest, _, _ = _frame_hash(png, None, DEFAULT_MASK_BOTTOM)
     except _HashUnavailable:
         return resp
-    etag = f'"{digest}"'
-    resp.headers["ETag"] = etag
+    token = f"{variant}:{digest}"
+    resp.headers["ETag"] = f'"{token}"'
     inm = (request.headers.get("If-None-Match") or "").strip()
-    if inm and inm.strip('"') == digest:
+    if inm and inm.strip('"') == token:
         resp.status_code = 304
         resp.set_data(b"")
     return resp
@@ -1056,6 +1124,8 @@ def screen_hash():
     kwargs, err = _screen_fetch_kwargs()
     if err is not None:
         return err
+    _capture_tls.meta = None
+    _capture_tls.variant = None
     png_a, _, err = _fetch_screenshot(**kwargs)
     if err is not None:
         return err
@@ -1086,6 +1156,10 @@ def screen_hash():
             "mask_bottom": mask_bottom,
             "width": width,
             "height": height,
+            "variant": getattr(_capture_tls, "variant", None) or _variant_key(
+                kwargs.get("monitor"), kwargs.get("region")
+            ),
+            "capture": getattr(_capture_tls, "meta", None) or {},
         }
     )
 
@@ -1120,6 +1194,8 @@ def screen_wait():
     kwargs, err = _screen_fetch_kwargs()
     if err is not None:
         return err
+    _capture_tls.meta = None
+    _capture_tls.variant = None
     deadline = time.monotonic() + timeout
     timed_out = True
     digest = width = height = None
@@ -1155,6 +1231,10 @@ def screen_wait():
             "mask_bottom": mask_bottom,
             "width": width,
             "height": height,
+            "variant": getattr(_capture_tls, "variant", None) or _variant_key(
+                kwargs.get("monitor"), kwargs.get("region")
+            ),
+            "capture": getattr(_capture_tls, "meta", None) or {},
         }
     )
 
