@@ -138,7 +138,8 @@ def test_resting_hand_only_while_claim_held(hands, rig):
     _run(r, clock, tick, 120.0)
     assert pag.moves and r.status()["active"] and r.status()["claim_held"]
     # every float stays local to where the pointer rested
-    assert all(abs(x - 500) <= 4 and abs(y - 500) <= 4 for x, y in pag.moves)
+    radius = hands.motion.REST_RADIUS_PX
+    assert all(abs(x - 500) <= radius and abs(y - 500) <= radius for x, y in pag.moves)
     assert r.set_claim(False, 0, 2, clock["t"])
     n = len(pag.moves)
     _run(r, clock, tick, 130.0)

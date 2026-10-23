@@ -182,15 +182,16 @@ def test_glide_duration_scales_with_distance_and_is_bounded(motion):
 def test_glide_never_leaves_the_radius_disc(motion):
     # Both endpoints are float offsets inside the resting disc; every
     # emitted sub-step must stay within rounding of the disc too.
+    radius = motion.REST_RADIUS_PX
     rng = random.Random(23)
     for _ in range(300):
-        a = (rng.uniform(-4, 4), rng.uniform(-4, 4))
-        b = (rng.uniform(-4, 4), rng.uniform(-4, 4))
-        if math.hypot(*a) > 4.0 or math.hypot(*b) > 4.0:
+        a = (rng.uniform(-radius, radius), rng.uniform(-radius, radius))
+        b = (rng.uniform(-radius, radius), rng.uniform(-radius, radius))
+        if math.hypot(*a) > radius or math.hypot(*b) > radius:
             continue
         steps = motion.plan_rest_path(a[0], a[1], b[0], b[1], rng)
         for sx, sy, _ in steps:
-            assert abs(sx) <= 4 and abs(sy) <= 4
+            assert abs(sx) <= radius and abs(sy) <= radius
 
 
 # ============================================================ executor
@@ -300,7 +301,7 @@ def test_episode_float_travel_is_continuous_and_local(hands, rig):
     prev = (500, 500)
     for mv in pag.moves:
         assert _cheb(prev, mv) <= 1  # across and within glides
-        assert abs(mv[0] - 500) <= 4 and abs(mv[1] - 500) <= 4  # radius
+        assert abs(mv[0] - 500) <= hands.motion.REST_RADIUS_PX and abs(mv[1] - 500) <= hands.motion.REST_RADIUS_PX  # radius
         prev = mv
 
 

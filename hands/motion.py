@@ -301,7 +301,7 @@ def plan_scroll(clicks, rng):
 # full at REST_RAMP_S; any act resets the ramp. There is no timeout.
 
 REST_RAMP_S = 1.5     # seconds from act end to full float intensity
-REST_RADIUS_PX = 4.0  # the float never strays further than this from rest
+REST_RADIUS_PX = 2.0  # the float never strays further than this from rest
 REST_STEP_PX = (1.0, 3.0)  # per-move jitter at full intensity (1-3 px class)
 
 

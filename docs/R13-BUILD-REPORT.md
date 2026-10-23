@@ -450,3 +450,21 @@ Still open, not claimed:
 - F7-C packaged Windows capture at 100/125/150 percent. No executable hash, topology, or DPI measurement.
 - The Windows `msvcrt` lock branch was not executed. These tests used Linux `fcntl.flock`.
 - `hands/test_capture_realism.py` still has the untouched failing check `jitter=false: single legacy write, no per-char sleeps`. That script is outside pytest.
+
+
+## Owner tuning — resting radius
+
+Authority: Christopher, 2026-10-22 20:50 CDT, via the standing operator. `REST_RADIUS_PX` in `hands/motion.py:304` is 2.0, was 4.0. `REST_STEP_PX`, `REST_RAMP_S`, and the glide constants are unchanged. The existing clamp and pull still scale off the radius. Build only; live R12 was not touched.
+
+The operator ruling the same evening authorized the three checks that hardcoded the old bound. Each now reads `REST_RADIUS_PX`, so the allowed box is ±2 instead of ±4:
+
+- `tests/test_r11_resting_watch.py:141` — the claim-held float used `abs(...) <= 4` on both axes. It now uses `hands.motion.REST_RADIUS_PX`.
+- `tests/test_r12_rest_float.py:185-194` — `test_glide_never_leaves_the_radius_disc` sampled `uniform(-4, 4)`, skipped `hypot > 4.0`, and asserted `abs <= 4`. Sample range, skip threshold, and the disc assertion all use `motion.REST_RADIUS_PX`.
+- `tests/test_r12_rest_float.py:304` — the episode float used `abs(...) <= 4` on both axes. It now uses `hands.motion.REST_RADIUS_PX`.
+
+No other assertion was edited.
+
+Commands:
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_r11_resting_watch.py tests/test_r12_rest_float.py`: 40 passed.
+- `/home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q --ignore=tests/test_relay_fix_acceptance.py`: 411 passed, 1 skipped.
+- `RELAY_REPO_ROOT=$PWD /home/openclaw/.venvs/muse-relay-r13/bin/python -m pytest -q tests/test_relay_fix_acceptance.py`: 21 passed.
