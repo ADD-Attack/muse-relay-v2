@@ -356,6 +356,34 @@ session secret into the gateway's `HANDS_SECRET` yourself.
 - Design rule inherited from v1's audit: the URL is obscurity, not a
   control — the secret and the transport are the controls.
 
+## Operating notes for agents
+
+*For an agent handed this repo cold. The sections above are the protocol; these are the field rules that keep a session honest. Distilled from sessions where the failures were almost all around the relay — perception, app state, power, comms — not in it.*
+
+**Before you say "ready"**
+- A green `/v1/info` is necessary, not sufficient. Ready = relay up + target app in a known state + capture path proven live + power chain checked + owner channel working.
+- "Ready", "started" and "running" require two independent live checks seconds apart — e.g. a frame under 3 s old *and* a log file growing between polls. One channel agreeing with itself proves nothing.
+- A feed that reports the same frame hash forever may be fetching nothing. Verify liveness with a direct fetch before trusting it.
+
+**Reading the screen**
+- Verify-by-screenshot has a quality bar: compressed full-screen frames are not evidence for small text or gauges. Crop and zoom digital readouts; a value you cannot read cleanly is *unread*, never estimated.
+- Physical-state claims come from underlying data — logs, digital values — never from a glance at a busy dashboard.
+- When the owner states a physical fact (what he plugged in, switched on, or started), that outranks your screen interpretation. Reconcile your data to his statement, not the reverse.
+
+**Acting**
+- If an action's expected effect does not appear within its normal latency, stop and read the *full frame* for a modal dialog before any retry. A waiting dialog is the first suspect; input fired at a UI that is not listening goes nowhere — and this relay runs unelevated, so its input is silently dropped into elevated windows (UIPI): an act reporting success is not proof it landed. Verify by capture.
+- Keys go to the *focused* window; clicks go to coordinates on the *captured* display. With several windows or monitors those can silently diverge — verify your target window is the focused, topmost one before acting on it.
+- First contact with any app includes a recon pass: how start/stop actually work there — prompts, defaults, busy states, secondary capture paths. Note it before real work.
+- After any stop or regroup, re-verify state from zero. Never resume from the pre-stop picture.
+
+**Power & comms**
+- Inventory every power source in the chain at session start: the PC's charge, the phone if it is the uplink, any device-side power the work depends on. Flag low readings early.
+- Tethers and hotspots turn themselves off. A dead feed mid-session is a power/uplink suspect first, not a relay suspect.
+- Note clock offsets on every device whose logs you will correlate; device timestamps are not wall time.
+
+**Owner channel**
+- A sent message is not a seen message. If the owner seems to be working from partial information, re-deliver the content itself — never point at "the message above".
+
 ## Relay Bench
 
 The hands have a test page: **Relay Bench** — a scored battery (clicking, holding and dragging, a 6x6 mate-in-1, instruction traps, a flash-capture test) for grading a computer-use agent working through this relay.
