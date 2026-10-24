@@ -178,6 +178,38 @@ def run():
     check("give_up is not repeated",
           all(r == "none" for r in results[12:]))
 
+    # R14: window title carries the gateway's own RELEASE string.
+    import types as _types
+    _real_load_service = appmod._load_service
+    try:
+        appmod._load_service = lambda name, path: _types.SimpleNamespace(RELEASE="v3 RTEST")
+        check("window title includes the release",
+              appmod.window_title() == "Muse Relay v2 — v3 RTEST")
+        appmod._load_service = lambda name, path: _types.SimpleNamespace()
+        check("window title falls back when RELEASE is missing",
+              appmod.window_title() == "Muse Relay v2")
+
+        def _boom(name, path):
+            raise RuntimeError("no module")
+
+        appmod._load_service = _boom
+        check("window title falls back when the gateway cannot load",
+              appmod.window_title() == "Muse Relay v2")
+    finally:
+        appmod._load_service = _real_load_service
+
+    # R14: the dashboard model passes the gateway's release through,
+    # normalized — a non-string release becomes None, never a crash.
+    _model = appmod.build_dashboard_model(
+        {"release": "v3 R14"}, None, [], None, [], 0.0)
+    check("dashboard model carries the release", _model["release"] == "v3 R14")
+    _model = appmod.build_dashboard_model(
+        {"release": 14}, None, [], None, [], 0.0)
+    check("dashboard model nulls a non-string release", _model["release"] is None)
+    _model = appmod.build_dashboard_model(None, None, [], None, [], 0.0)
+    check("dashboard model release is None when the gateway is down",
+          _model["release"] is None)
+
     print("FAILED: " + ", ".join(failures) if failures else "ALL PASS")
     return 1 if failures else 0
 

@@ -454,6 +454,10 @@ def build_dashboard_model(info, claim, queue, reserved_for, receipts, now):
         "feed": summarize_receipts(receipts, now),
         "counts": receipt_state_counts(receipts),
         "sync": info_dict.get("claim_sync") if isinstance(info_dict.get("claim_sync"), dict) else None,
+        # R14: the running release, straight from the gateway's own
+        # /v1/info payload — the header renders it next to the brand
+        # so the owner can read the build off the app itself.
+        "release": info_dict.get("release") if isinstance(info_dict.get("release"), str) else None,
     }
 
 
@@ -639,6 +643,30 @@ def _load_service(name, rel_path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _release_string():
+    """The build's release identity (e.g. "v3 R14"), or None.
+
+    Read from the gateway module itself — the same RELEASE constant
+    /v1/info reports — so the window title and the header can never
+    drift from the API (wishlist: accurate version number in the bar
+    at the top, 2026-10-21). The gateway module is executed under a
+    scratch name purely to read the constant; the real service load
+    happens later, under its own name, when the owner presses Start.
+    """
+    try:
+        module = _load_service("gateway_release_probe", SERVICE_FILES["gateway"])
+        release = getattr(module, "RELEASE", None)
+        return release if isinstance(release, str) and release else None
+    except Exception:
+        return None
+
+
+def window_title():
+    """Native window title: the app name plus the running release."""
+    release = _release_string()
+    return f"Muse Relay v2 — {release}" if release else "Muse Relay v2"
 
 
 class _Scheduler:
@@ -1384,7 +1412,7 @@ def main():
             relay.stop()
         return
     window = webview.create_window(
-        "Muse Relay v2",
+        window_title(),
         url,
         # R11: the default IS the minimum size (owner: "a really good size").
         width=980,

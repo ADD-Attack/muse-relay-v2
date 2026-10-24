@@ -310,6 +310,7 @@
     const phase = phaseOf(view);
     document.body.dataset.phase = phase;
     setText($("phase-text"), { idle: "Stopped", starting: "Starting…", running: "All systems running", degraded: "Attention needed" }[phase]);
+    setText($("brand-release"), (view.model && view.model.release) || "");
     $("btn-start").disabled = started || busy;
     $("btn-start").classList.toggle("is-running", started);
     setText($("start-label"), started ? "Running" : busy ? "Starting…" : "Start");

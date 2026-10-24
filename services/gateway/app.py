@@ -38,7 +38,7 @@ from io import BytesIO
 import requests
 from flask import Flask, Response, jsonify, request
 
-RELEASE = "v3 R13"  # this build's release identity, reported on /v1/info
+RELEASE = "v3 R14"  # this build's release identity, reported on /v1/info
 
 TOKEN = os.environ.get("RELAY_GATEWAY_TOKEN", "")
 HANDS_URL = os.environ.get("HANDS_URL", "http://host.docker.internal:5000").rstrip("/")
