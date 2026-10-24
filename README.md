@@ -356,4 +356,12 @@ session secret into the gateway's `HANDS_SECRET` yourself.
 - Design rule inherited from v1's audit: the URL is obscurity, not a
   control — the secret and the transport are the controls.
 
+## Relay Bench
+
+The hands have a test page: **Relay Bench** — a scored battery (clicking, holding and dragging, a 6x6 mate-in-1, instruction traps, a flash-capture test) for grading a computer-use agent working through this relay.
+
+**Run it: https://moorefolio.com/relay-bench/**
+
+The bench lives on the portfolio site, not in this repo — this link is its only presence here.
+
 MIT © 2026 Christopher Moore
