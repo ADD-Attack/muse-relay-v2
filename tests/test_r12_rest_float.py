@@ -311,5 +311,5 @@ def test_info_reports_release(gw, monkeypatch):
     gw._reset_coordination_state()
     monkeypatch.setattr(gw, "_reachability", lambda: (False, False, None))
     info = gw.app.test_client().get("/v1/info", headers=TOKEN).get_json()
-    assert info["release"] == "v3 R12" == gw.RELEASE
+    assert info["release"] == "v3 R13" == gw.RELEASE
     gw._reset_coordination_state()
